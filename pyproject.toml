@@ -1,0 +1,11 @@
+[project]
+name = "contrigent"
+version = "0.1.0"
+description = "Human-supervised AI software engineering agent"
+requires-python = ">=3.12,<3.13"
+dependencies = []
+
+[tool.uv.workspace]
+members = [
+    "apps/api",
+]
