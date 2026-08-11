@@ -5,6 +5,9 @@ from contrigent_api.agents.issue_analyzer.output_schema import (
     ImplementationStep,
     IssueAnalysis,
 )
+from contrigent_api.models.repository_test_result import (
+    RepositoryTestResult,
+)
 from contrigent_api.models.run_record import RunStatus
 from contrigent_api.services.run_memory_store import (
     InvalidRunTransitionError,
@@ -19,6 +22,8 @@ from contrigent_api.services.run_memory_store import (
     approve_final_changes,
     start_applying_changes,
     complete_applying_changes,
+    start_repository_tests,
+    complete_repository_tests,
 )
 
 from contrigent_api.models.worker_result import (
@@ -369,4 +374,53 @@ def test_changes_are_applied_after_final_approval() -> None:
     assert (
         updated_run.applied_files
         == ["src/users.py"]
+    )
+    testing_run = start_repository_tests(
+    run.id
+    )
+
+    assert (
+        testing_run.status
+        == RunStatus.RUNNING_TESTS
+    )
+
+    test_result = RepositoryTestResult(
+        passed=True,
+        stage="tests",
+        command=[
+            "uv",
+            "run",
+            "python",
+            "-m",
+            "pytest",
+        ],
+        exit_code=0,
+        duration_seconds=0.02,
+        stdout="10 passed",
+        stderr="",
+    )
+
+    tested_run = complete_repository_tests(
+        run.id,
+        test_result,
+    )
+
+    assert (
+        tested_run.status
+        == RunStatus.TESTS_PASSED
+    )
+
+    assert (
+        tested_run.repository_tests_completed
+        is True
+    )
+
+    assert (
+        tested_run.repository_tests_passed
+        is True
+    )
+
+    assert (
+        tested_run.repository_test_result
+        == test_result
     )

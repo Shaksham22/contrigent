@@ -4,9 +4,10 @@ from contrigent_api.models.project_context import (
     ProjectSource,
 )
 
-from contrigent_api.models.project_context import (
-    ProjectSource,
+from contrigent_api.services.repository_test_runner import (
+    run_repository_tests,
 )
+
 from contrigent_api.services.approved_file_applier import (
     apply_approved_files,
 )
@@ -49,6 +50,8 @@ from contrigent_api.services.run_memory_store import (
     approve_final_changes,
     start_applying_changes,
     complete_applying_changes,
+    start_repository_tests,
+    complete_repository_tests,
 )
 
 from contrigent_api.services.worker_runner import (
@@ -96,9 +99,9 @@ async def start_run(
 
     if using_project:
         project = load_project(
-            request.project_name
+            request.project_name,
+            ProjectSource.SAMPLE,
         )
-
     else:
         if (
             request.github_issue_url is None
@@ -273,12 +276,24 @@ def approve_run_final_changes(
             ).as_posix()
             for path in applied_paths
         ]
-
-        return complete_applying_changes(
+        run = complete_applying_changes(
             run.id,
             original_branch=original_branch,
             run_branch=run_branch,
             applied_files=applied_files,
+        )
+
+        run = start_repository_tests(
+            run.id
+        )
+
+        test_result = run_repository_tests(
+            repository_path
+        )
+
+        return complete_repository_tests(
+            run.id,
+            test_result,
         )
 
     except RunNotFoundError as error:

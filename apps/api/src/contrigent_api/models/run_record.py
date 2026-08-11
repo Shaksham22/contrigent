@@ -1,7 +1,6 @@
 from datetime import datetime, timezone
 from enum import Enum
 from uuid import UUID, uuid4
-from pydantic import Field
 
 from pydantic import BaseModel, Field
 
@@ -20,7 +19,9 @@ from contrigent_api.agents.independent_reviewer.output_schema import (
 from contrigent_api.models.project_context import (
     ProjectSource,
 )
-
+from contrigent_api.models.repository_test_result import (
+    RepositoryTestResult,
+)
 class RunStatus(str, Enum):
     ANALYZING = "analyzing"
     AWAITING_PLAN_APPROVAL = "awaiting_plan_approval"
@@ -32,6 +33,9 @@ class RunStatus(str, Enum):
     FINAL_APPROVED = "final_approved"
     APPLYING_CHANGES = "applying_changes"
     CHANGES_APPLIED = "changes_applied"
+    RUNNING_TESTS = "running_tests"
+    TESTS_PASSED = "tests_passed"
+    TESTS_FAILED = "tests_failed"
     COMPLETED = "completed"
     FAILED = "failed"
 
@@ -72,19 +76,19 @@ class Run(BaseModel):
     applied_files: list[str] = Field(
         default_factory=list
 )
+    repository_tests_completed: bool = False
+    repository_tests_passed: bool | None = None
+
+    repository_test_result: (
+        RepositoryTestResult | None
+    ) = None
+
+    repository_tests_completed_at: (
+        datetime | None
+    ) = None
 
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(
             timezone.utc
         )
     )
-
-changes_applied: bool = False
-changes_applied_at: datetime | None = None
-
-original_branch: str | None = None
-run_branch: str | None = None
-
-applied_files: list[str] = Field(
-    default_factory=list
-)

@@ -7,6 +7,9 @@ from contrigent_api.models.worker_result import (
     FileReplacement,
     WorkerResult,
 )
+from contrigent_api.models.repository_test_result import (
+    RepositoryTestResult,
+)
 
 from contrigent_api.agents.independent_reviewer.output_schema import (
     ReviewerResult,
@@ -228,5 +231,54 @@ def complete_applying_changes(
     run.applied_files = applied_files
 
     run.status = RunStatus.CHANGES_APPLIED
+
+    return run
+
+def start_repository_tests(
+    run_id: UUID,
+) -> Run:
+    run = get_run(run_id)
+
+    if run.status != RunStatus.CHANGES_APPLIED:
+        raise InvalidRunTransitionError(
+            "Repository tests can only run "
+            "after approved changes are applied."
+        )
+
+    run.status = RunStatus.RUNNING_TESTS
+
+    return run
+
+
+def complete_repository_tests(
+    run_id: UUID,
+    test_result: RepositoryTestResult,
+) -> Run:
+    run = get_run(run_id)
+
+    if run.status != RunStatus.RUNNING_TESTS:
+        raise InvalidRunTransitionError(
+            "Repository tests are not currently running."
+        )
+
+    run.repository_tests_completed = True
+    run.repository_tests_passed = (
+        test_result.passed
+    )
+
+    run.repository_test_result = (
+        test_result
+    )
+
+    run.repository_tests_completed_at = (
+        datetime.now(
+            timezone.utc
+        )
+    )
+
+    if test_result.passed:
+        run.status = RunStatus.TESTS_PASSED
+    else:
+        run.status = RunStatus.TESTS_FAILED
 
     return run
