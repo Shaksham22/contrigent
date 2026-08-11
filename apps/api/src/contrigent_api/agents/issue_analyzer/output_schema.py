@@ -3,6 +3,11 @@ from enum import Enum
 from pydantic import BaseModel, Field
 
 
+class WorkerAssignment(BaseModel):
+    order: int = Field(ge=1)
+    worker_id: str
+    task: str
+    depends_on: list[str] = Field(default_factory=list)
 class Feasibility(str, Enum):
     FEASIBLE = "feasible"
     NEEDS_CLARIFICATION = "needs_clarification"
@@ -34,4 +39,12 @@ class IssueAnalysis(BaseModel):
     likely_files: list[str]
     risks: list[Risk]
     feasibility: Feasibility
+
+    worker_assignments: list[WorkerAssignment] = Field(
+        description=(
+            "Specific work assigned to available worker agents."
+        )
+    )
+
     implementation_plan: list[ImplementationStep]
+

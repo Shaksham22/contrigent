@@ -1,3 +1,5 @@
 [agents]
 issue_analyzer = "gpt-5.4-mini"
 code_editor = "gpt-5.4-mini"
+python_solver = "gpt-5.4-mini"
+testing_specialist = "gpt-5.4-mini"

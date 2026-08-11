@@ -1,0 +1,15 @@
+id = "testing_specialist"
+name = "Testing Specialist"
+agent_type = "worker"
+enabled = true
+
+description = """
+Handles automated tests, regression coverage, test quality, and verification of proposed code changes.
+"""
+
+capabilities = [
+    "testing",
+    "regression_testing",
+    "test_quality",
+    "verification"
+]

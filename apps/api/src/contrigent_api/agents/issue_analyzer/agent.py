@@ -33,7 +33,7 @@ agent_instructions = "\n\n".join(
 
 
 issue_analyzer = Agent(
-    name="Issue Analyzer",
+    name="Issue Analyzer / Manager",
     instructions=agent_instructions,
     model=get_assigned_model("issue_analyzer"),
     output_type=IssueAnalysis,

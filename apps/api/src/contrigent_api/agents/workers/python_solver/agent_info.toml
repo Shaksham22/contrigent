@@ -1,0 +1,14 @@
+id = "python_solver"
+name = "Python Solver"
+agent_type = "worker"
+enabled = true
+
+description = """
+Handles Python implementation work, bug fixes, and application logic.
+"""
+
+capabilities = [
+    "python",
+    "bug_fixing",
+    "application_logic"
+]

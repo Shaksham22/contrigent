@@ -11,9 +11,15 @@ from contrigent_api.services.run_memory_store import (
     approve_plan,
     attach_analysis,
     clear_runs,
+    complete_worker_work,
     create_run,
+    start_worker_work,
 )
 
+from contrigent_api.models.worker_result import (
+    FileReplacement,
+    WorkerResult,
+)
 
 @pytest.fixture(autouse=True)
 def reset_run_store() -> None:
@@ -27,6 +33,7 @@ def make_analysis() -> IssueAnalysis:
             "Fall back to username when display_name is None."
         ],
         ambiguities=[],
+        worker_assignments=[],
         repository_instructions=[],
         likely_files=[
             "src/users.py",
@@ -84,3 +91,68 @@ def test_plan_cannot_be_approved_before_analysis() -> None:
 
     with pytest.raises(InvalidRunTransitionError):
         approve_plan(run.id)
+
+
+def test_worker_work_starts_after_plan_approval() -> None:
+    run = create_run(
+        "python-missing-display-name"
+    )
+
+    attach_analysis(
+        run.id,
+        make_analysis(),
+    )
+
+    approve_plan(run.id)
+
+    updated_run = start_worker_work(
+        run.id
+    )
+
+    assert (
+        updated_run.status
+        == RunStatus.RUNNING_WORKERS
+    )
+
+
+def test_worker_results_complete_run() -> None:
+    run = create_run(
+        "python-missing-display-name"
+    )
+
+    attach_analysis(
+        run.id,
+        make_analysis(),
+    )
+
+    approve_plan(run.id)
+    start_worker_work(run.id)
+
+    worker_result = WorkerResult(
+        summary="Fixed the Python bug.",
+        findings=[],
+        files_to_replace=[],
+    )
+
+    proposed_file = FileReplacement(
+        file_path="src/users.py",
+        reason="Fix missing display name.",
+        replacement_content="updated file",
+    )
+
+    completed_run = complete_worker_work(
+        run.id,
+        {
+            "python_solver": worker_result
+        },
+        [
+            proposed_file
+        ],
+)
+
+    assert (
+        completed_run.status
+        == RunStatus.WORKERS_COMPLETED
+    )
+    assert completed_run.worker_work_completed is True
+    assert "python_solver" in completed_run.worker_results

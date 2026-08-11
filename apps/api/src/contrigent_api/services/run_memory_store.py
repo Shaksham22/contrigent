@@ -3,6 +3,12 @@ from uuid import UUID
 
 from contrigent_api.agents.issue_analyzer.output_schema import IssueAnalysis
 from contrigent_api.models.run_record import Run, RunStatus
+from contrigent_api.models.worker_result import (
+    FileReplacement,
+    WorkerResult,
+)
+
+
 
 
 class RunNotFoundError(Exception):
@@ -76,3 +82,49 @@ def approve_plan(run_id: UUID) -> Run:
 def clear_runs() -> None:
     """Clear the in-memory store. Used by automated tests."""
     _runs.clear()
+
+
+
+def start_worker_work(
+    run_id: UUID,
+) -> Run:
+    run = get_run(run_id)
+
+    if run.status != RunStatus.PLAN_APPROVED:
+        raise InvalidRunTransitionError(
+            "Workers cannot run before plan approval."
+        )
+
+    run.status = RunStatus.RUNNING_WORKERS
+
+    return run
+
+
+def complete_worker_work(
+    run_id: UUID,
+    worker_results: dict[str, WorkerResult],
+    proposed_files: list[FileReplacement],
+) -> Run:
+    run = get_run(run_id)
+
+    if run.status != RunStatus.RUNNING_WORKERS:
+        raise InvalidRunTransitionError(
+            "Worker execution is not currently running."
+        )
+
+    run.worker_results = worker_results
+    run.proposed_files = proposed_files
+    run.worker_work_completed = True
+    run.status = RunStatus.WORKERS_COMPLETED
+
+    return run
+
+
+def fail_run(
+    run_id: UUID,
+) -> Run:
+    run = get_run(run_id)
+
+    run.status = RunStatus.FAILED
+
+    return run
