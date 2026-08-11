@@ -8,8 +8,13 @@ from contrigent_api.models.worker_result import (
     WorkerResult,
 )
 
+from contrigent_api.agents.independent_reviewer.output_schema import (
+    ReviewerResult,
+)
 
-
+from contrigent_api.models.project_context import (
+    ProjectSource,
+)
 
 class RunNotFoundError(Exception):
     """Raised when a requested run does not exist."""
@@ -22,9 +27,13 @@ class InvalidRunTransitionError(Exception):
 _runs: dict[UUID, Run] = {}
 
 
-def create_run(sample_project_name: str) -> Run:
+def create_run(
+    project_name: str,
+    project_source: ProjectSource = ProjectSource.SAMPLE,
+) -> Run:
     run = Run(
-        sample_project_name=sample_project_name,
+        project_name=project_name,
+        project_source=project_source,
         status=RunStatus.ANALYZING,
     )
 
@@ -118,7 +127,36 @@ def complete_worker_work(
     run.status = RunStatus.WORKERS_COMPLETED
 
     return run
+def start_review(
+    run_id: UUID,
+) -> Run:
+    run = get_run(run_id)
 
+    if run.status != RunStatus.WORKERS_COMPLETED:
+        raise InvalidRunTransitionError(
+            "Review cannot start before worker work is completed."
+        )
+
+    run.status = RunStatus.RUNNING_REVIEWER
+
+    return run
+
+
+def complete_review(
+    run_id: UUID,
+    reviewer_result: ReviewerResult,
+) -> Run:
+    run = get_run(run_id)
+
+    if run.status != RunStatus.RUNNING_REVIEWER:
+        raise InvalidRunTransitionError(
+            "Review is not currently running."
+        )
+
+    run.reviewer_result = reviewer_result
+    run.status = RunStatus.AWAITING_FINAL_APPROVAL
+
+    return run
 
 def fail_run(
     run_id: UUID,
@@ -126,5 +164,69 @@ def fail_run(
     run = get_run(run_id)
 
     run.status = RunStatus.FAILED
+
+    return run
+
+
+
+def approve_final_changes(
+    run_id: UUID,
+) -> Run:
+    run = get_run(run_id)
+
+    if run.status != RunStatus.AWAITING_FINAL_APPROVAL:
+        raise InvalidRunTransitionError(
+            "Final approval is only allowed after review."
+        )
+
+    run.final_approved = True
+    run.final_approved_at = datetime.now(
+        timezone.utc
+    )
+    run.status = RunStatus.FINAL_APPROVED
+
+    return run
+
+
+def start_applying_changes(
+    run_id: UUID,
+) -> Run:
+    run = get_run(run_id)
+
+    if run.status != RunStatus.FINAL_APPROVED:
+        raise InvalidRunTransitionError(
+            "Approved changes can only be applied "
+            "after final approval."
+        )
+
+    run.status = RunStatus.APPLYING_CHANGES
+
+    return run
+
+
+def complete_applying_changes(
+    run_id: UUID,
+    original_branch: str,
+    run_branch: str,
+    applied_files: list[str],
+) -> Run:
+    run = get_run(run_id)
+
+    if run.status != RunStatus.APPLYING_CHANGES:
+        raise InvalidRunTransitionError(
+            "Changes can only be completed while "
+            "the run is applying changes."
+        )
+
+    run.changes_applied = True
+    run.changes_applied_at = datetime.now(
+        timezone.utc
+    )
+
+    run.original_branch = original_branch
+    run.run_branch = run_branch
+    run.applied_files = applied_files
+
+    run.status = RunStatus.CHANGES_APPLIED
 
     return run

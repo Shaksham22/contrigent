@@ -10,8 +10,8 @@ from contrigent_api.models.worker_result import (
     FileReplacement,
     WorkerResult,
 )
-from contrigent_api.services.sample_project_reader import (
-    SampleProjectContext,
+from contrigent_api.models.project_context import (
+    ProjectContext,
 )
 from contrigent_api.services.worker_discovery import (
     discover_workers,
@@ -85,7 +85,7 @@ def validate_replacement_path(
 
 def remove_unchanged_replacements(
     worker_result: WorkerResult,
-    sample_project: SampleProjectContext,
+    sample_project: ProjectContext,
 ) -> WorkerResult:
     changed_files = []
 
@@ -126,7 +126,7 @@ def build_worker_input(
     worker_id: str,
     assigned_task: str,
     shared_worker_results: dict[str, WorkerResult],
-    sample_project: SampleProjectContext,
+    sample_project: ProjectContext,
     issue_analysis: IssueAnalysis,
 ) -> str:
     worker = get_available_worker(
@@ -189,7 +189,7 @@ async def run_worker(
     worker_id: str,
     assigned_task: str,
     shared_worker_results: dict[str, WorkerResult],
-    sample_project: SampleProjectContext,
+    sample_project: ProjectContext,
     issue_analysis: IssueAnalysis,
 ) -> WorkerResult:
     worker_agent = load_worker_agent(
@@ -225,7 +225,7 @@ async def run_worker(
 
 
 async def run_assigned_workers(
-    sample_project: SampleProjectContext,
+    sample_project: ProjectContext,
     issue_analysis: IssueAnalysis,
 ) -> tuple[
     dict[str, WorkerResult],

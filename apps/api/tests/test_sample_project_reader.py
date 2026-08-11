@@ -9,7 +9,8 @@ from contrigent_api.services.sample_project_reader import (
 def test_loads_controlled_sample_project() -> None:
     sample_project = load_sample_project("python-missing-display-name")
 
-    assert sample_project.name == "python-missing-display-name"
+    assert sample_project.project_name == "python-missing-display-name"
+    assert sample_project.project_source.value == "sample"
 
     assert "Handle users without a display name" in sample_project.issue
     assert "automated tests" in sample_project.contributing

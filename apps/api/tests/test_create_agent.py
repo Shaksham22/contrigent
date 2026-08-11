@@ -82,7 +82,7 @@ def test_creates_standard_worker_files_and_model_entry(
 ) -> None:
     workers_folder, model_config_file = isolated_agent_files
 
-    create_agent.create_worker_agent(
+    create_agent.create_agent(
         agent_name="Backend Solver",
         description=(
             "Handles backend APIs, Python services, "
@@ -126,7 +126,7 @@ def test_blank_agent_name_is_rejected(
         ValueError,
         match="Agent name cannot be blank",
     ):
-        create_agent.create_worker_agent(
+        create_agent.create_agent(
             agent_name="   ",
             description="Handles backend work.",
             model="gpt-worker-test",
@@ -140,7 +140,7 @@ def test_blank_description_is_rejected(
         ValueError,
         match="description cannot be blank",
     ):
-        create_agent.create_worker_agent(
+        create_agent.create_agent(
             agent_name="Backend Solver",
             description="   ",
             model="gpt-worker-test",
@@ -150,7 +150,7 @@ def test_blank_description_is_rejected(
 def test_duplicate_agent_name_is_rejected(
     isolated_agent_files: tuple[Path, Path],
 ) -> None:
-    create_agent.create_worker_agent(
+    create_agent.create_agent(
         agent_name="Backend Solver",
         description="Handles backend work.",
         model="gpt-worker-test",
@@ -160,7 +160,7 @@ def test_duplicate_agent_name_is_rejected(
         ValueError,
         match="already exists",
     ):
-        create_agent.create_worker_agent(
+        create_agent.create_agent(
             agent_name="BACKEND-SOLVER",
             description="Duplicate backend worker.",
             model="gpt-worker-test",
@@ -185,7 +185,7 @@ def test_model_config_duplicate_is_rejected(
         ValueError,
         match="already exists in agent_models.toml",
     ):
-        create_agent.create_worker_agent(
+        create_agent.create_agent(
             agent_name="backend solver",
             description="Handles backend work.",
             model="gpt-worker-test",
@@ -232,7 +232,7 @@ def test_failed_model_config_update_removes_worker_folder(
         OSError,
         match="simulated config update failure",
     ):
-        create_agent.create_worker_agent(
+        create_agent.create_agent(
             agent_name="Backend Solver",
             description="Handles backend work.",
             model="gpt-worker-test",
@@ -252,3 +252,53 @@ def test_failed_model_config_update_removes_worker_folder(
     assert not model_config_file.with_suffix(
         ".toml.tmp"
     ).exists()
+
+
+def test_custom_path_creates_specialized_agent(
+    isolated_agent_files: tuple[Path, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, _ = isolated_agent_files
+
+    contrigent_code_folder = (
+        tmp_path / "contrigent_api"
+    )
+
+    monkeypatch.setattr(
+        create_agent,
+        "CONTRIGENT_CODE_FOLDER",
+        contrigent_code_folder,
+    )
+
+    create_agent.create_agent(
+        agent_name="Reviewer",
+        description=(
+            "Independently reviews proposed changes."
+        ),
+        model="gpt-reviewer-test",
+        target_path="agents",
+        agent_type="reviewer",
+    )
+
+    reviewer_folder = (
+        contrigent_code_folder
+        / "agents"
+        / "reviewer"
+    )
+
+    assert reviewer_folder.is_dir()
+
+    assert {
+        path.name
+        for path in reviewer_folder.iterdir()
+    } == EXPECTED_WORKER_FILES
+
+    with (
+        reviewer_folder
+        / "agent_info.toml"
+    ).open("rb") as file:
+        reviewer_info = tomllib.load(file)
+
+    assert reviewer_info["id"] == "reviewer"
+    assert reviewer_info["agent_type"] == "reviewer"

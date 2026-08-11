@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from enum import Enum
 from uuid import UUID, uuid4
+from pydantic import Field
 
 from pydantic import BaseModel, Field
 
@@ -12,6 +13,13 @@ from contrigent_api.models.worker_result import (
     WorkerResult,
 )
 
+from contrigent_api.agents.independent_reviewer.output_schema import (
+    ReviewerResult,
+)
+
+from contrigent_api.models.project_context import (
+    ProjectSource,
+)
 
 class RunStatus(str, Enum):
     ANALYZING = "analyzing"
@@ -19,13 +27,18 @@ class RunStatus(str, Enum):
     PLAN_APPROVED = "plan_approved"
     RUNNING_WORKERS = "running_workers"
     WORKERS_COMPLETED = "workers_completed"
+    RUNNING_REVIEWER = "running_reviewer"
+    AWAITING_FINAL_APPROVAL = "awaiting_final_approval"
+    FINAL_APPROVED = "final_approved"
+    APPLYING_CHANGES = "applying_changes"
+    CHANGES_APPLIED = "changes_applied"
     COMPLETED = "completed"
     FAILED = "failed"
 
-
 class Run(BaseModel):
     id: UUID = Field(default_factory=uuid4)
-    sample_project_name: str
+    project_name: str
+    project_source: ProjectSource
     status: RunStatus
 
     analysis: IssueAnalysis | None = None
@@ -47,9 +60,31 @@ class Run(BaseModel):
     ] = Field(
         default_factory=list
     )
+    reviewer_result: ReviewerResult | None = None
+    final_approved: bool = False
+    final_approved_at: datetime | None = None
+    changes_applied: bool = False
+    changes_applied_at: datetime | None = None
+
+    original_branch: str | None = None
+    run_branch: str | None = None
+
+    applied_files: list[str] = Field(
+        default_factory=list
+)
 
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(
             timezone.utc
         )
     )
+
+changes_applied: bool = False
+changes_applied_at: datetime | None = None
+
+original_branch: str | None = None
+run_branch: str | None = None
+
+applied_files: list[str] = Field(
+    default_factory=list
+)

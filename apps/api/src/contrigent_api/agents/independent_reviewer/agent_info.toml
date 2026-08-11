@@ -1,0 +1,15 @@
+id = "independent_reviewer"
+name = "Independent Reviewer"
+agent_type = "reviewer"
+enabled = true
+
+description = """
+Independently reviews proposed code changes against the original issue, approved plan, repository instructions, and worker results.
+"""
+
+capabilities = [
+    "code_review",
+    "scope_review",
+    "compatibility_review",
+    "repository_instruction_review"
+]

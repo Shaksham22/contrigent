@@ -1,4 +1,10 @@
-from dataclasses import dataclass
+from contrigent_api.models.project_context import (
+    ProjectContext,
+    ProjectSource,
+)
+from contrigent_api.services.repository_file_reader import (
+    read_repository_text_files,
+)
 from pathlib import Path
 
 
@@ -9,16 +15,10 @@ class SampleProjectNotFoundError(Exception):
     """Raised when a requested sample project does not exist."""
 
 
-@dataclass(frozen=True)
-class SampleProjectContext:
-    name: str
-    issue: str
-    readme: str
-    contributing: str
-    files: dict[str, str]
 
 
-def load_sample_project(name: str) -> SampleProjectContext:
+
+def load_sample_project(name: str) -> ProjectContext:
     sample_projects_root = SAMPLE_PROJECTS_ROOT.resolve()
     sample_project_path = (sample_projects_root / name).resolve()
 
@@ -44,26 +44,28 @@ def load_sample_project(name: str) -> SampleProjectContext:
     if not all(path.is_file() for path in required_files):
         raise SampleProjectNotFoundError(name)
 
-    repository_files: dict[str, str] = {}
+    issue = issue_path.read_text(
+        encoding="utf-8"
+    )
 
-    for directory_name in ("src", "tests"):
-        directory_path = repository_path / directory_name
+    readme = readme_path.read_text(
+        encoding="utf-8"
+    )
 
-        if not directory_path.is_dir():
-            continue
+    contributing = contributing_path.read_text(
+        encoding="utf-8"
+    )
 
-        for path in sorted(directory_path.rglob("*")):
-            if path.is_file():
-                relative_path = path.relative_to(repository_path).as_posix()
+    files = read_repository_text_files(
+        repository_path
+    )
 
-                repository_files[relative_path] = path.read_text(
-                    encoding="utf-8"
-                )
-
-    return SampleProjectContext(
-        name=name,
-        issue=issue_path.read_text(encoding="utf-8"),
-        readme=readme_path.read_text(encoding="utf-8"),
-        contributing=contributing_path.read_text(encoding="utf-8"),
-        files=repository_files,
+    return ProjectContext(
+        project_name=name,
+        project_source=ProjectSource.SAMPLE,
+        repository_path=repository_path,
+        issue=issue,
+        readme=readme,
+        contributing=contributing,
+        files=files,
     )

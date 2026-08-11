@@ -14,11 +14,20 @@ from contrigent_api.services.run_memory_store import (
     complete_worker_work,
     create_run,
     start_worker_work,
+    complete_review,
+    start_review,
+    approve_final_changes,
+    start_applying_changes,
+    complete_applying_changes,
 )
 
 from contrigent_api.models.worker_result import (
     FileReplacement,
     WorkerResult,
+)
+
+from contrigent_api.agents.independent_reviewer.output_schema import (
+    ReviewerResult,
 )
 
 @pytest.fixture(autouse=True)
@@ -156,3 +165,208 @@ def test_worker_results_complete_run() -> None:
     )
     assert completed_run.worker_work_completed is True
     assert "python_solver" in completed_run.worker_results
+
+
+def test_review_starts_after_workers_complete() -> None:
+    run = create_run(
+        "python-missing-display-name"
+    )
+
+    attach_analysis(
+        run.id,
+        make_analysis(),
+    )
+
+    approve_plan(run.id)
+    start_worker_work(run.id)
+
+    complete_worker_work(
+        run.id,
+        {},
+        [],
+    )
+
+    updated_run = start_review(
+        run.id
+    )
+
+    assert (
+        updated_run.status
+        == RunStatus.RUNNING_REVIEWER
+    )
+
+
+def test_review_moves_run_to_final_approval() -> None:
+    run = create_run(
+        "python-missing-display-name"
+    )
+
+    attach_analysis(
+        run.id,
+        make_analysis(),
+    )
+
+    approve_plan(run.id)
+    start_worker_work(run.id)
+
+    complete_worker_work(
+        run.id,
+        {},
+        [],
+    )
+
+    start_review(run.id)
+
+    reviewer_result = ReviewerResult(
+        recommendation="approve",
+        summary="The proposed solution addresses the issue.",
+        findings=[],
+        files_reviewed=["src/users.py"],
+    )
+
+    reviewed_run = complete_review(
+        run.id,
+        reviewer_result,
+    )
+
+    assert (
+        reviewed_run.status
+        == RunStatus.AWAITING_FINAL_APPROVAL
+    )
+
+    assert (
+        reviewed_run.reviewer_result
+        == reviewer_result
+    )
+
+
+def test_final_approval_happens_after_review() -> None:
+    run = create_run(
+        "python-missing-display-name"
+    )
+
+    attach_analysis(
+        run.id,
+        make_analysis(),
+    )
+
+    approve_plan(run.id)
+    start_worker_work(run.id)
+
+    complete_worker_work(
+        run.id,
+        {},
+        [],
+    )
+
+    start_review(run.id)
+
+    reviewer_result = ReviewerResult(
+        recommendation="approve",
+        summary="The proposed solution addresses the issue.",
+        findings=[],
+        files_reviewed=["src/users.py"],
+    )
+
+    complete_review(
+        run.id,
+        reviewer_result,
+    )
+
+    approved_run = approve_final_changes(
+        run.id
+    )
+
+    assert (
+        approved_run.status
+        == RunStatus.FINAL_APPROVED
+    )
+
+    assert approved_run.final_approved is True
+    assert approved_run.final_approved_at is not None
+
+def test_final_approval_is_rejected_before_review() -> None:
+    run = create_run(
+        "python-missing-display-name"
+    )
+
+    with pytest.raises(
+        InvalidRunTransitionError,
+        match="only allowed after review",
+    ):
+        approve_final_changes(
+            run.id
+        )
+
+def test_changes_are_applied_after_final_approval() -> None:
+    run = create_run(
+        "python-missing-display-name"
+    )
+
+    attach_analysis(
+        run.id,
+        make_analysis(),
+    )
+
+    approve_plan(run.id)
+    start_worker_work(run.id)
+
+    complete_worker_work(
+        run.id,
+        {},
+        [],
+    )
+
+    start_review(run.id)
+
+    reviewer_result = ReviewerResult(
+        recommendation="approve",
+        summary="The proposed solution addresses the issue.",
+        findings=[],
+        files_reviewed=["src/users.py"],
+    )
+
+    complete_review(
+        run.id,
+        reviewer_result,
+    )
+
+    approve_final_changes(run.id)
+
+    start_applying_changes(
+        run.id
+    )
+
+    updated_run = complete_applying_changes(
+        run.id,
+        original_branch="main",
+        run_branch="contrigent/test-run",
+        applied_files=[
+            "src/users.py"
+        ],
+    )
+
+    assert (
+        updated_run.status
+        == RunStatus.CHANGES_APPLIED
+    )
+
+    assert (
+        updated_run.changes_applied
+        is True
+    )
+
+    assert (
+        updated_run.original_branch
+        == "main"
+    )
+
+    assert (
+        updated_run.run_branch
+        == "contrigent/test-run"
+    )
+
+    assert (
+        updated_run.applied_files
+        == ["src/users.py"]
+    )

@@ -5,8 +5,10 @@ from contrigent_api.agents.issue_analyzer.output_schema import (
     IssueAnalysis,
     WorkerAssignment,
 )
+from contrigent_api.models.project_context import (
+    ProjectContext,
+)
 from contrigent_api.services.sample_project_reader import (
-    SampleProjectContext,
     load_sample_project,
 )
 
@@ -40,12 +42,12 @@ Capabilities: {capabilities or "None listed"}"""
     return "\n\n".join(worker_sections)
 
 def build_analysis_input(
-    sample_project: SampleProjectContext,
+    project: ProjectContext,
     workers: list[dict],
 ) -> str:
     repository_files = "\n\n".join(
         f"--- FILE: {path} ---\n{content}"
-        for path, content in sample_project.files.items()
+        for path, content in project.files.items()
     )
 
     available_workers = build_available_workers_section(
@@ -57,26 +59,26 @@ def build_analysis_input(
 {available_workers}
 
 === GITHUB ISSUE ===
-{sample_project.issue}
+{project.issue}
 
 === README ===
-{sample_project.readme}
+{project.readme}
 
 === CONTRIBUTING INSTRUCTIONS ===
-{sample_project.contributing}
+{project.contributing}
 
 === REPOSITORY FILES ===
 {repository_files}
 """.strip()
 
 
-async def analyze_sample_project(name: str):
-    sample_project = load_sample_project(name)
-
+async def analyze_project(
+    project: ProjectContext,
+):
     workers = discover_workers()
 
     agent_input = build_analysis_input(
-        sample_project,
+        project,
         workers,
     )
 
@@ -93,14 +95,26 @@ async def analyze_sample_project(name: str):
         raise TypeError(
             "Issue Analyzer returned an unexpected output type."
         )
+
     validate_worker_assignments(
-    result.final_output.worker_assignments,
-    workers,
-)
+        result.final_output.worker_assignments,
+        workers,
+    )
 
     return (
         result.final_output,
         result.context_wrapper.usage,
+    )
+
+async def analyze_sample_project(
+    project_name: str,
+):
+    project = load_sample_project(
+        project_name
+    )
+
+    return await analyze_project(
+        project
     )
 
 def validate_worker_assignments(
