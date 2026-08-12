@@ -11,6 +11,28 @@ from contrigent_api.services.repository_test_runner import (
     run_repository_tests,
 )
 
+from contrigent_api.services.docker_runtime_manager import (
+    DockerRuntimeSession,
+)
+
+
+@pytest.fixture(autouse=True)
+def disable_real_docker_management(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        repository_test_runner,
+        "start_docker_runtime_if_needed",
+        lambda: DockerRuntimeSession(
+            started_by_contrigent=False
+        ),
+    )
+
+    monkeypatch.setattr(
+        repository_test_runner,
+        "stop_docker_runtime_if_started",
+        lambda _session: None,
+    )
 
 def create_uv_test_repository(
     tmp_path: Path,

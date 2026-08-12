@@ -6,7 +6,11 @@ import time
 from contrigent_api.models.repository_test_result import (
     RepositoryTestResult,
 )
-
+from contrigent_api.services.docker_runtime_manager import (
+    DockerRuntimeSession,
+    start_docker_runtime_if_needed,
+    stop_docker_runtime_if_started,
+)
 
 DOCKER_IMAGE = (
     "ghcr.io/astral-sh/uv:"
@@ -142,15 +146,17 @@ def build_docker_command(
         ),
         "--env",
         "PYTHONDONTWRITEBYTECODE=1",
-        "--volume",
-        (
-            f"{repository_path.resolve()}"
-            ":/workspace:ro"
+        "--mount",
+        build_bind_mount(
+            repository_path,
+            "/workspace",
+            read_only=True,
         ),
-        "--volume",
-        (
-            f"{test_environment_path.resolve()}"
-            ":/test-environment"
+        "--mount",
+        build_bind_mount(
+            test_environment_path,
+            "/test-environment",
+            read_only=False,
         ),
         "--workdir",
         "/workspace",
@@ -206,115 +212,152 @@ def run_repository_tests(
             "dependency setup cannot modify "
             "the repository."
         )
-
-    started_at = time.monotonic()
-
-    with tempfile.TemporaryDirectory(
-        prefix="contrigent-test-environment-"
-    ) as temporary_folder:
-        test_environment_path = Path(
-            temporary_folder
+    docker_session: DockerRuntimeSession = (
+        start_docker_runtime_if_needed()
         )
+    try:
+        started_at = time.monotonic()
 
-        # Docker Desktop must be able to write
-        # the temporary Linux virtual environment.
-        test_environment_path.chmod(
-            0o777
-        )
-
-        dependency_command = [
-            "uv",
-            "sync",
-            "--locked",
-            "--all-groups",
-        ]
-
-        dependency_docker_command = (
-            build_docker_command(
-                repository_path,
-                test_environment_path,
-                dependency_command,
-                disable_network=False,
+        with tempfile.TemporaryDirectory(
+            prefix="contrigent-test-environment-"
+        ) as temporary_folder:
+            test_environment_path = Path(
+                temporary_folder
             )
-        )
 
-        (
-            dependency_exit_code,
-            dependency_stdout,
-            dependency_stderr,
-            dependency_timed_out,
-        ) = run_docker_command(
-            dependency_docker_command,
-            DEPENDENCY_SETUP_TIMEOUT_SECONDS,
-        )
+            # Docker Desktop must be able to write
+            # the temporary Linux virtual environment.
+            test_environment_path.chmod(
+                0o777
+            )
 
-        if (
-            dependency_timed_out
-            or dependency_exit_code != 0
-        ):
+            dependency_command = [
+                "uv",
+                "sync",
+                "--locked",
+                "--all-groups",
+            ]
+
+            dependency_docker_command = (
+                build_docker_command(
+                    repository_path,
+                    test_environment_path,
+                    dependency_command,
+                    disable_network=False,
+                )
+            )
+
+            (
+                dependency_exit_code,
+                dependency_stdout,
+                dependency_stderr,
+                dependency_timed_out,
+            ) = run_docker_command(
+                dependency_docker_command,
+                DEPENDENCY_SETUP_TIMEOUT_SECONDS,
+            )
+
+            if (
+                dependency_timed_out
+                or dependency_exit_code != 0
+            ):
+                return RepositoryTestResult(
+                    passed=False,
+                    stage="dependency_setup",
+                    command=dependency_command,
+                    exit_code=dependency_exit_code,
+                    timed_out=dependency_timed_out,
+                    duration_seconds=round(
+                        time.monotonic()
+                        - started_at,
+                        3,
+                    ),
+                    stdout=dependency_stdout,
+                    stderr=dependency_stderr,
+                )
+
+            test_command = [
+                "uv",
+                "run",
+                "--offline",
+                "--no-sync",
+                "python",
+                "-m",
+                "pytest",
+                "-v",
+                "-p",
+                "no:cacheprovider",
+            ]
+
+            test_docker_command = (
+                build_docker_command(
+                    repository_path,
+                    test_environment_path,
+                    test_command,
+                    disable_network=True,
+                )
+            )
+
+            (
+                test_exit_code,
+                test_stdout,
+                test_stderr,
+                test_timed_out,
+            ) = run_docker_command(
+                test_docker_command,
+                TEST_TIMEOUT_SECONDS,
+            )
+
+            passed = (
+                not test_timed_out
+                and test_exit_code == 0
+            )
+
             return RepositoryTestResult(
-                passed=False,
-                stage="dependency_setup",
-                command=dependency_command,
-                exit_code=dependency_exit_code,
-                timed_out=dependency_timed_out,
+                passed=passed,
+                stage="tests",
+                command=test_command,
+                exit_code=test_exit_code,
+                timed_out=test_timed_out,
                 duration_seconds=round(
                     time.monotonic()
                     - started_at,
                     3,
                 ),
-                stdout=dependency_stdout,
-                stderr=dependency_stderr,
+                stdout=test_stdout,
+                stderr=test_stderr,
             )
-
-        test_command = [
-            "uv",
-            "run",
-            "--offline",
-            "--no-sync",
-            "python",
-            "-m",
-            "pytest",
-            "-v",
-            "-p",
-            "no:cacheprovider",
-        ]
-
-        test_docker_command = (
-            build_docker_command(
-                repository_path,
-                test_environment_path,
-                test_command,
-                disable_network=True,
+    finally:
+        try:
+            stop_docker_runtime_if_started(
+                docker_session
             )
+        except Exception:
+            pass
+
+
+def build_bind_mount(
+    host_path: Path,
+    container_path: str,
+    *,
+    read_only: bool,
+) -> str:
+    resolved_path = str(
+        host_path.resolve()
+    )
+
+    if "," in resolved_path:
+        raise RepositoryTestRunnerError(
+            "Docker test paths cannot contain commas."
         )
 
-        (
-            test_exit_code,
-            test_stdout,
-            test_stderr,
-            test_timed_out,
-        ) = run_docker_command(
-            test_docker_command,
-            TEST_TIMEOUT_SECONDS,
-        )
+    mount = (
+        f"type=bind,"
+        f"src={resolved_path},"
+        f"dst={container_path}"
+    )
 
-        passed = (
-            not test_timed_out
-            and test_exit_code == 0
-        )
+    if read_only:
+        mount += ",readonly"
 
-        return RepositoryTestResult(
-            passed=passed,
-            stage="tests",
-            command=test_command,
-            exit_code=test_exit_code,
-            timed_out=test_timed_out,
-            duration_seconds=round(
-                time.monotonic()
-                - started_at,
-                3,
-            ),
-            stdout=test_stdout,
-            stderr=test_stderr,
-        )
+    return mount
