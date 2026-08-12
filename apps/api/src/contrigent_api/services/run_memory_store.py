@@ -33,10 +33,14 @@ _runs: dict[UUID, Run] = {}
 def create_run(
     project_name: str,
     project_source: ProjectSource = ProjectSource.SAMPLE,
+    github_issue_url: str | None = None,
+    github_repository_url: str | None = None,
 ) -> Run:
     run = Run(
         project_name=project_name,
         project_source=project_source,
+        github_issue_url=github_issue_url,
+        github_repository_url=github_repository_url,
         status=RunStatus.ANALYZING,
     )
 
@@ -280,5 +284,126 @@ def complete_repository_tests(
         run.status = RunStatus.TESTS_PASSED
     else:
         run.status = RunStatus.TESTS_FAILED
+
+    return run
+
+
+def start_commit(
+    run_id: UUID,
+) -> Run:
+    run = get_run(run_id)
+
+    if run.status != RunStatus.TESTS_PASSED:
+        raise InvalidRunTransitionError(
+            "A commit can only be created "
+            "after repository tests pass."
+        )
+
+    run.status = RunStatus.COMMITTING
+
+    return run
+
+
+def complete_commit(
+    run_id: UUID,
+    commit_sha: str,
+    commit_message: str,
+) -> Run:
+    run = get_run(run_id)
+
+    if run.status != RunStatus.COMMITTING:
+        raise InvalidRunTransitionError(
+            "A commit is not currently being created."
+        )
+
+    run.commit_created = True
+    run.commit_sha = commit_sha
+    run.commit_message = commit_message
+    run.committed_at = datetime.now(
+        timezone.utc
+    )
+
+    run.status = RunStatus.COMMITTED
+
+    return run
+
+
+def start_push(
+    run_id: UUID,
+) -> Run:
+    run = get_run(run_id)
+
+    if run.status != RunStatus.COMMITTED:
+        raise InvalidRunTransitionError(
+            "A branch can only be pushed "
+            "after its commit is created."
+        )
+
+    run.status = RunStatus.PUSHING
+
+    return run
+
+
+def complete_push(
+    run_id: UUID,
+) -> Run:
+    run = get_run(run_id)
+
+    if run.status != RunStatus.PUSHING:
+        raise InvalidRunTransitionError(
+            "A branch push is not currently running."
+        )
+
+    run.branch_pushed = True
+    run.branch_pushed_at = datetime.now(
+        timezone.utc
+    )
+
+    run.status = RunStatus.PUSHED
+
+    return run
+
+
+def start_draft_pr(
+    run_id: UUID,
+) -> Run:
+    run = get_run(run_id)
+
+    if run.status != RunStatus.PUSHED:
+        raise InvalidRunTransitionError(
+            "A draft pull request can only be created "
+            "after the branch is pushed."
+        )
+
+    run.status = RunStatus.CREATING_DRAFT_PR
+
+    return run
+
+
+def complete_draft_pr(
+    run_id: UUID,
+    pr_number: int,
+    pr_url: str,
+) -> Run:
+    run = get_run(run_id)
+
+    if run.status != RunStatus.CREATING_DRAFT_PR:
+        raise InvalidRunTransitionError(
+            "A draft pull request is not currently "
+            "being created."
+        )
+
+    run.draft_pr_created = True
+    run.draft_pr_number = pr_number
+    run.draft_pr_url = pr_url
+    run.draft_pr_created_at = datetime.now(
+        timezone.utc
+    )
+
+    run.completed_at = datetime.now(
+        timezone.utc
+    )
+
+    run.status = RunStatus.COMPLETED
 
     return run

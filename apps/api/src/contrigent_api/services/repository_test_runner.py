@@ -2,6 +2,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import time
+from collections.abc import Callable
 
 from contrigent_api.models.repository_test_result import (
     RepositoryTestResult,
@@ -16,6 +17,10 @@ DOCKER_IMAGE = (
     "ghcr.io/astral-sh/uv:"
     "python3.12-bookworm-slim"
 )
+ProgressCallback = Callable[
+    [int, str],
+    None,
+]
 
 DEPENDENCY_SETUP_TIMEOUT_SECONDS = 300
 TEST_TIMEOUT_SECONDS = 300
@@ -179,10 +184,27 @@ def build_docker_command(
 
     return command
 
+def report_progress(
+    progress_callback: ProgressCallback | None,
+    percentage: int,
+    message: str,
+) -> None:
+    if progress_callback is None:
+        return
+
+    progress_callback(
+        percentage,
+        message,
+    )
 
 def run_repository_tests(
     repository_path: Path,
+    progress_callback: ProgressCallback | None = None,
 ) -> RepositoryTestResult:
+    report_progress(
+    progress_callback,
+    5,
+    "Checking Docker",)
     repository_path = (
         repository_path.resolve()
     )
@@ -215,7 +237,17 @@ def run_repository_tests(
     docker_session: DockerRuntimeSession = (
         start_docker_runtime_if_needed()
         )
+    report_progress(
+    progress_callback,
+    15,
+    "Docker ready",
+)
     try:
+        report_progress(
+            progress_callback,
+            25,
+            "Preparing test environment",
+        )
         started_at = time.monotonic()
 
         with tempfile.TemporaryDirectory(
@@ -261,6 +293,11 @@ def run_repository_tests(
                 dependency_timed_out
                 or dependency_exit_code != 0
             ):
+                report_progress(
+                    progress_callback,
+                    95,
+                    "Dependency setup failed",
+                )
                 return RepositoryTestResult(
                     passed=False,
                     stage="dependency_setup",
@@ -275,6 +312,17 @@ def run_repository_tests(
                     stdout=dependency_stdout,
                     stderr=dependency_stderr,
                 )
+            report_progress(
+                progress_callback,
+                50,
+                "Dependencies ready",
+            )
+
+            report_progress(
+                progress_callback,
+                60,
+                "Running repository tests",
+            )
 
             test_command = [
                 "uv",
@@ -307,10 +355,24 @@ def run_repository_tests(
                 test_docker_command,
                 TEST_TIMEOUT_SECONDS,
             )
+            report_progress(
+                progress_callback,
+                90,
+                "Tests finished",
+            )
 
             passed = (
                 not test_timed_out
                 and test_exit_code == 0
+            )
+            report_progress(
+                progress_callback,
+                95,
+                (
+                    "Processing test results"
+                    if passed
+                    else "Processing test failure"
+                ),
             )
 
             return RepositoryTestResult(

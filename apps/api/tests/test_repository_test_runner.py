@@ -202,3 +202,89 @@ def test_repository_without_uv_lock_is_rejected(
         run_repository_tests(
             repository
         )
+
+def test_repository_test_progress_is_reported(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = (
+        create_uv_test_repository(
+            tmp_path
+        )
+    )
+
+    call_count = 0
+
+    def fake_run(
+        command: list[str],
+        **_kwargs,
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal call_count
+        call_count += 1
+
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=(
+                "Dependencies ready."
+                if call_count == 1
+                else "10 passed"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        repository_test_runner.subprocess,
+        "run",
+        fake_run,
+    )
+
+    progress_events: list[
+        tuple[int, str]
+    ] = []
+
+    result = run_repository_tests(
+        repository,
+        progress_callback=(
+            lambda percentage, message:
+            progress_events.append(
+                (
+                    percentage,
+                    message,
+                )
+            )
+        ),
+    )
+
+    assert result.passed is True
+
+    assert progress_events == [
+        (
+            5,
+            "Checking Docker",
+        ),
+        (
+            15,
+            "Docker ready",
+        ),
+        (
+            25,
+            "Preparing test environment",
+        ),
+        (
+            50,
+            "Dependencies ready",
+        ),
+        (
+            60,
+            "Running repository tests",
+        ),
+        (
+            90,
+            "Tests finished",
+        ),
+        (
+            95,
+            "Processing test results",
+        ),
+    ]

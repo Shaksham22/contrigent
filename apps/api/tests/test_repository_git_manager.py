@@ -6,10 +6,13 @@ import pytest
 
 from contrigent_api.services.repository_git_manager import (
     RepositoryGitError,
+    create_approved_commit,
     create_run_branch,
     get_current_branch,
+    push_run_branch,
     rollback_run_branch,
 )
+
 
 
 def create_test_git_repository(
@@ -174,3 +177,93 @@ def test_run_branch_can_be_rolled_back(
     ).read_text(
         encoding="utf-8"
     ) == "value = 1\n"
+
+
+def test_approved_files_can_be_committed(
+    tmp_path: Path,
+) -> None:
+    repository = (
+        create_test_git_repository(
+            tmp_path
+        )
+    )
+
+    _, run_branch = create_run_branch(
+        repository,
+        uuid4(),
+    )
+
+    (
+        repository / "example.py"
+    ).write_text(
+        "value = 2\n",
+        encoding="utf-8",
+    )
+
+    commit_sha = create_approved_commit(
+        repository,
+        expected_branch=run_branch,
+        approved_files=[
+            "example.py"
+        ],
+        commit_message="Fix example",
+    )
+
+    assert len(commit_sha) == 40
+
+    assert (
+        subprocess.run(
+            [
+                "git",
+                "status",
+                "--porcelain",
+            ],
+            cwd=repository,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        == ""
+    )
+
+
+def test_unapproved_file_blocks_commit(
+    tmp_path: Path,
+) -> None:
+    repository = (
+        create_test_git_repository(
+            tmp_path
+        )
+    )
+
+    _, run_branch = create_run_branch(
+        repository,
+        uuid4(),
+    )
+
+    (
+        repository / "example.py"
+    ).write_text(
+        "value = 2\n",
+        encoding="utf-8",
+    )
+
+    (
+        repository / "unexpected.py"
+    ).write_text(
+        "unexpected = True\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        RepositoryGitError,
+        match="do not exactly match",
+    ):
+        create_approved_commit(
+            repository,
+            expected_branch=run_branch,
+            approved_files=[
+                "example.py"
+            ],
+            commit_message="Fix example",
+        )

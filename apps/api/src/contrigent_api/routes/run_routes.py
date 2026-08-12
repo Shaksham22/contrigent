@@ -12,7 +12,9 @@ from contrigent_api.services.approved_file_applier import (
     apply_approved_files,
 )
 from contrigent_api.services.repository_git_manager import (
+    create_approved_commit,
     create_run_branch,
+    push_run_branch,
     rollback_run_branch,
 )
 from contrigent_api.services.github_project_downloader import (
@@ -24,8 +26,17 @@ from contrigent_api.services.downloaded_github_project_reader import (
 from contrigent_api.services.project_reader import (
     load_project,
 )
-from contrigent_api.services.project_reader import (
-    load_project,
+from contrigent_api.services.github_pull_request_creator import (
+    GitHubPullRequestError,
+    build_pull_request_body,
+    create_draft_pull_request,
+    get_github_token,
+    get_issue_title,
+)
+
+from contrigent_api.services.github_project_downloader import (
+    get_or_download_github_project,
+    parse_github_issue_url,
 )
 
 from fastapi import APIRouter, HTTPException
@@ -49,6 +60,12 @@ from contrigent_api.services.run_memory_store import (
     start_review,
     approve_final_changes,
     start_applying_changes,
+    start_commit,
+    complete_commit,
+    start_push,
+    complete_push,
+    start_draft_pr,
+    complete_draft_pr,
     complete_applying_changes,
     start_repository_tests,
     complete_repository_tests,
@@ -131,6 +148,18 @@ async def start_run(
     run = create_run(
         project.project_name,
         project.project_source,
+        github_issue_url=(
+            request.github_issue_url
+            if project.project_source
+            == ProjectSource.GITHUB
+            else None
+        ),
+        github_repository_url=(
+            request.github_repository_url
+            if project.project_source
+            == ProjectSource.GITHUB
+            else None
+        ),
     )
 
     try:
@@ -230,8 +259,21 @@ def approve_run_final_changes(
     original_branch: str | None = None
     run_branch: str | None = None
     repository_path = None
+    commit_created = False
 
     try:
+        existing_run = get_run(
+            run_id
+        )
+
+        if (
+            existing_run.project_source
+            == ProjectSource.GITHUB
+        ):
+            # Fail before touching the repository if
+            # PR authentication is not configured.
+            get_github_token()
+
         run = approve_final_changes(
             run_id
         )
@@ -241,6 +283,14 @@ def approve_run_final_changes(
             != ProjectSource.GITHUB
         ):
             return run
+
+        if (
+            run.github_issue_url is None
+            or run.github_repository_url is None
+        ):
+            raise InvalidRunTransitionError(
+                "GitHub run metadata is incomplete."
+            )
 
         project = load_project(
             run.project_name,
@@ -276,6 +326,7 @@ def approve_run_final_changes(
             ).as_posix()
             for path in applied_paths
         ]
+
         run = complete_applying_changes(
             run.id,
             original_branch=original_branch,
@@ -291,9 +342,107 @@ def approve_run_final_changes(
             repository_path
         )
 
-        return complete_repository_tests(
+        run = complete_repository_tests(
             run.id,
             test_result,
+        )
+
+        # Failed tests are a normal gated outcome.
+        # Never commit or push them.
+        if not test_result.passed:
+            return run
+
+        issue_location = (
+            parse_github_issue_url(
+                run.github_issue_url
+            )
+        )
+
+        issue_title = get_issue_title(
+            project.issue
+        )
+
+        commit_message = (
+            f"Fix issue "
+            f"#{issue_location.issue_number}"
+        )
+
+        run = start_commit(
+            run.id
+        )
+
+        commit_sha = create_approved_commit(
+            repository_path,
+            expected_branch=run_branch,
+            approved_files=run.applied_files,
+            commit_message=commit_message,
+        )
+
+        commit_created = True
+
+        run = complete_commit(
+            run.id,
+            commit_sha=commit_sha,
+            commit_message=commit_message,
+        )
+
+        run = start_push(
+            run.id
+        )
+
+        push_run_branch(
+            repository_path,
+            branch_name=run_branch,
+            expected_repository_url=(
+                run.github_repository_url
+            ),
+        )
+
+        run = complete_push(
+            run.id
+        )
+
+        run = start_draft_pr(
+            run.id
+        )
+
+        test_summary = (
+            f"exit code "
+            f"{test_result.exit_code}; "
+            f"{test_result.duration_seconds}s"
+        )
+
+        pr_body = build_pull_request_body(
+            issue_number=(
+                issue_location.issue_number
+            ),
+            analysis_summary=(
+                run.analysis.summary
+                if run.analysis is not None
+                else "Approved repository changes."
+            ),
+            test_summary=test_summary,
+        )
+
+        pr_result = (
+            create_draft_pull_request(
+                repository_url=(
+                    run.github_repository_url
+                ),
+                issue_url=(
+                    run.github_issue_url
+                ),
+                head_branch=run_branch,
+                base_branch=original_branch,
+                title=issue_title,
+                body=pr_body,
+            )
+        )
+
+        return complete_draft_pr(
+            run.id,
+            pr_number=pr_result.number,
+            pr_url=pr_result.url,
         )
 
     except RunNotFoundError as error:
@@ -308,9 +457,26 @@ def approve_run_final_changes(
             detail=str(error),
         ) from error
 
+    except GitHubPullRequestError as error:
+        try:
+            fail_run(run_id)
+        except Exception:
+            pass
+
+        raise HTTPException(
+            status_code=502,
+            detail=str(error),
+        ) from error
+
     except Exception:
+        # Before a commit exists, Contrigent can safely
+        # discard its temporary run branch.
+        #
+        # After a commit exists, preserve the branch and
+        # commit for diagnosis/recovery.
         if (
-            repository_path is not None
+            not commit_created
+            and repository_path is not None
             and original_branch is not None
             and run_branch is not None
         ):

@@ -36,6 +36,11 @@ class RunStatus(str, Enum):
     RUNNING_TESTS = "running_tests"
     TESTS_PASSED = "tests_passed"
     TESTS_FAILED = "tests_failed"
+    COMMITTING = "committing"
+    COMMITTED = "committed"
+    PUSHING = "pushing"
+    PUSHED = "pushed"
+    CREATING_DRAFT_PR = "creating_draft_pr"
     COMPLETED = "completed"
     FAILED = "failed"
 
@@ -43,6 +48,8 @@ class Run(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     project_name: str
     project_source: ProjectSource
+    github_issue_url: str | None = None
+    github_repository_url: str | None = None
     status: RunStatus
 
     analysis: IssueAnalysis | None = None
@@ -86,6 +93,20 @@ class Run(BaseModel):
     repository_tests_completed_at: (
         datetime | None
     ) = None
+    commit_created: bool = False
+    commit_sha: str | None = None
+    commit_message: str | None = None
+    committed_at: datetime | None = None
+
+    branch_pushed: bool = False
+    branch_pushed_at: datetime | None = None
+
+    draft_pr_created: bool = False
+    draft_pr_number: int | None = None
+    draft_pr_url: str | None = None
+    draft_pr_created_at: datetime | None = None
+
+    completed_at: datetime | None = None
 
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(

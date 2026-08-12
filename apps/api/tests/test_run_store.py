@@ -24,6 +24,16 @@ from contrigent_api.services.run_memory_store import (
     complete_applying_changes,
     start_repository_tests,
     complete_repository_tests,
+    start_commit,
+    complete_commit,
+    start_push,
+    complete_push,
+    start_draft_pr,
+    complete_draft_pr,
+)
+
+from contrigent_api.models.project_context import (
+    ProjectSource,
 )
 
 from contrigent_api.models.worker_result import (
@@ -424,3 +434,57 @@ def test_changes_are_applied_after_final_approval() -> None:
         tested_run.repository_test_result
         == test_result
     )
+
+def test_successful_publish_lifecycle() -> None:
+    run = create_run(
+        "example",
+        ProjectSource.GITHUB,
+        github_issue_url=(
+            "https://github.com/example/demo/issues/1"
+        ),
+        github_repository_url=(
+            "https://github.com/example/demo"
+        ),
+    )
+
+    run.status = RunStatus.TESTS_PASSED
+
+    start_commit(
+        run.id
+    )
+
+    complete_commit(
+        run.id,
+        commit_sha="a" * 40,
+        commit_message="Fix issue #1",
+    )
+
+    start_push(
+        run.id
+    )
+
+    complete_push(
+        run.id
+    )
+
+    start_draft_pr(
+        run.id
+    )
+
+    completed_run = complete_draft_pr(
+        run.id,
+        pr_number=12,
+        pr_url=(
+            "https://github.com/example/demo/pull/12"
+        ),
+    )
+
+    assert (
+        completed_run.status
+        == RunStatus.COMPLETED
+    )
+
+    assert completed_run.commit_created is True
+    assert completed_run.branch_pushed is True
+    assert completed_run.draft_pr_created is True
+    assert completed_run.draft_pr_number == 12
