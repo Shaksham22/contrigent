@@ -17,6 +17,7 @@ from contrigent_api.services.run_memory_store import (
     complete_worker_work,
     create_run,
     start_worker_work,
+    start_revision_worker_work,
     complete_review,
     start_review,
     approve_final_changes,
@@ -488,3 +489,96 @@ def test_successful_publish_lifecycle() -> None:
     assert completed_run.branch_pushed is True
     assert completed_run.draft_pr_created is True
     assert completed_run.draft_pr_number == 12
+
+
+def test_changes_required_review_can_start_revision_workers() -> None:
+    run = create_run(
+        "python-missing-display-name"
+    )
+
+    original_analysis = make_analysis()
+
+    revised_analysis = make_analysis().model_copy(
+        update={
+            "summary": "Revise the proposed solution."
+        }
+    )
+
+    attach_analysis(
+        run.id,
+        original_analysis,
+    )
+
+    approve_plan(run.id)
+    start_worker_work(run.id)
+
+    complete_worker_work(
+        run.id,
+        {},
+        [],
+    )
+
+    start_review(run.id)
+
+    reviewer_result = ReviewerResult(
+        recommendation="changes_required",
+        summary="A revision is required.",
+        findings=[],
+        files_reviewed=["src/users.py"],
+    )
+
+    revised_run = start_revision_worker_work(
+        run.id,
+        revised_analysis,
+        reviewer_result,
+    )
+
+    assert (
+        revised_run.status
+        == RunStatus.RUNNING_WORKERS
+    )
+
+    assert revised_run.analysis == revised_analysis
+    assert revised_run.reviewer_result == reviewer_result
+    assert revised_run.worker_work_completed is False
+
+
+def test_approved_review_cannot_start_revision_workers() -> None:
+    run = create_run(
+        "python-missing-display-name"
+    )
+
+    analysis = make_analysis()
+
+    attach_analysis(
+        run.id,
+        analysis,
+    )
+
+    approve_plan(run.id)
+    start_worker_work(run.id)
+
+    complete_worker_work(
+        run.id,
+        {},
+        [],
+    )
+
+    start_review(run.id)
+
+    reviewer_result = ReviewerResult(
+        recommendation="approve",
+        summary="The solution is approved.",
+        findings=[],
+        files_reviewed=["src/users.py"],
+    )
+
+    with pytest.raises(
+        InvalidRunTransitionError,
+        match="changes_required",
+    ):
+        start_revision_worker_work(
+            run.id,
+            analysis,
+            reviewer_result,
+        )

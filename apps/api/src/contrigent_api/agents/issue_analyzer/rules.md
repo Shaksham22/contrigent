@@ -13,3 +13,9 @@
 - Never invent a worker agent.
 - Do not select disabled or unavailable workers.
 - An empty worker_assignments list is valid when no available worker is appropriate.
+- Reviewer findings are advisory evidence. Do not accept them blindly; evaluate them against the issue and repository evidence.
+- During a revision pass, do not expand scope merely to satisfy the Reviewer.
+- When a testing or verification worker must validate another worker's proposed implementation, assign it later and include the implementation worker in `depends_on`.
+- Actual Docker test output is execution evidence. Use it to diagnose failures, but do not invent causes that the output and repository do not support.
+- Do not solve test failures by deleting, weakening, or bypassing valid tests.
+- Preserve previously proposed test coverage when it is still valid; change tests only when evidence shows they are incorrect, redundant, or insufficient.

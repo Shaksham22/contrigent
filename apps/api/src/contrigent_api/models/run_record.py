@@ -52,6 +52,26 @@ class Run(BaseModel):
     github_repository_url: str | None = None
     status: RunStatus
 
+    max_review_rounds: int = Field(
+        default=2,
+        ge=1,
+        le=10,
+    )
+    max_testing_rounds: int = Field(
+        default=2,
+        ge=1,
+        le=10,
+    )
+
+    review_rounds_completed: int = Field(
+        default=0,
+        ge=0,
+    )
+    testing_rounds_completed: int = Field(
+        default=0,
+        ge=0,
+    )
+
     analysis: IssueAnalysis | None = None
 
     plan_approved: bool = False
@@ -72,6 +92,11 @@ class Run(BaseModel):
         default_factory=list
     )
     reviewer_result: ReviewerResult | None = None
+
+    candidate_test_result: (
+        RepositoryTestResult | None
+    ) = None
+
     final_approved: bool = False
     final_approved_at: datetime | None = None
     changes_applied: bool = False

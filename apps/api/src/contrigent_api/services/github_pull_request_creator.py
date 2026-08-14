@@ -11,6 +11,12 @@ from contrigent_api.services.github_project_downloader import (
 
 
 GITHUB_API_VERSION = "2026-03-10"
+PULL_REQUEST_ATTRIBUTION = (
+    "\n\n---\n\n"
+    "This pull request and its code changes were generated using "
+    "**Contrigent**, a multi-agent software engineering framework "
+    "developed by [Shaksham22](https://github.com/Shaksham22)."
+)
 
 
 class GitHubPullRequestError(RuntimeError):
@@ -71,10 +77,10 @@ def build_pull_request_body(
         "after human approval."
     )
 
-
 def create_draft_pull_request(
     repository_url: str,
     issue_url: str,
+    head_owner: str,
     head_branch: str,
     base_branch: str,
     title: str,
@@ -102,11 +108,18 @@ def create_draft_pull_request(
 
     token = get_github_token()
 
+    pull_request_body = (
+        body.rstrip()
+        + PULL_REQUEST_ATTRIBUTION
+    )
+
     payload = {
         "title": title,
-        "head": head_branch,
+        "head": (
+            f"{head_owner}:{head_branch}"
+        ),
         "base": base_branch,
-        "body": body,
+        "body": pull_request_body,
         "draft": True,
     }
 

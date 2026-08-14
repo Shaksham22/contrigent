@@ -35,12 +35,16 @@ def create_run(
     project_source: ProjectSource = ProjectSource.SAMPLE,
     github_issue_url: str | None = None,
     github_repository_url: str | None = None,
+    max_review_rounds: int = 2,
+    max_testing_rounds: int = 2,
 ) -> Run:
     run = Run(
         project_name=project_name,
         project_source=project_source,
         github_issue_url=github_issue_url,
         github_repository_url=github_repository_url,
+        max_review_rounds=max_review_rounds,
+        max_testing_rounds=max_testing_rounds,
         status=RunStatus.ANALYZING,
     )
 
@@ -115,6 +119,86 @@ def start_worker_work(
 
     return run
 
+def start_test_revision_worker_work(
+    run_id: UUID,
+    revised_analysis: IssueAnalysis,
+) -> Run:
+    run = get_run(run_id)
+
+    if run.status != RunStatus.WORKERS_COMPLETED:
+        raise InvalidRunTransitionError(
+            "Test remediation can only start "
+            "after worker work is completed."
+        )
+
+    if (
+        run.candidate_test_result is None
+        or run.candidate_test_result.passed
+    ):
+        raise InvalidRunTransitionError(
+            "Test remediation requires a failed "
+            "candidate test result."
+        )
+
+    if (
+        run.testing_rounds_completed
+        >= run.max_testing_rounds
+    ):
+        raise InvalidRunTransitionError(
+            "No candidate testing rounds remain."
+        )
+
+    run.analysis = revised_analysis
+
+    # The workers are about to create a new candidate.
+    # The previous test result no longer describes it.
+    run.candidate_test_result = None
+
+    run.worker_work_completed = False
+    run.status = RunStatus.RUNNING_WORKERS
+
+    return run
+
+
+def start_revision_worker_work(
+    run_id: UUID,
+    revised_analysis: IssueAnalysis,
+    reviewer_result: ReviewerResult,
+) -> Run:
+    run = get_run(run_id)
+
+    if run.status != RunStatus.RUNNING_REVIEWER:
+        raise InvalidRunTransitionError(
+            "Revision workers can only start after a review."
+        )
+
+    if reviewer_result.recommendation != "changes_required":
+        raise InvalidRunTransitionError(
+            "Revision workers require a changes_required review."
+        )
+
+    if (
+        run.review_rounds_completed + 1
+        >= run.max_review_rounds
+    ):
+        raise InvalidRunTransitionError(
+            "No review rounds remain for another "
+            "automatic revision."
+        )
+
+    run.review_rounds_completed += 1
+
+    run.analysis = revised_analysis
+    run.reviewer_result = reviewer_result
+
+    # Reviewer remediation creates a new candidate,
+    # so the previous Docker result is stale.
+    run.candidate_test_result = None
+
+    run.worker_work_completed = False
+    run.status = RunStatus.RUNNING_WORKERS
+
+    return run
 
 def complete_worker_work(
     run_id: UUID,
@@ -134,6 +218,33 @@ def complete_worker_work(
     run.status = RunStatus.WORKERS_COMPLETED
 
     return run
+
+def record_candidate_test_result(
+    run_id: UUID,
+    test_result: RepositoryTestResult,
+) -> Run:
+    run = get_run(run_id)
+
+    if run.status != RunStatus.WORKERS_COMPLETED:
+        raise InvalidRunTransitionError(
+            "Candidate tests can only be recorded "
+            "after worker work is completed."
+        )
+
+    if (
+        run.testing_rounds_completed
+        >= run.max_testing_rounds
+    ):
+        raise InvalidRunTransitionError(
+            "No candidate testing rounds remain."
+        )
+
+    run.testing_rounds_completed += 1
+    run.candidate_test_result = test_result
+
+    return run
+
+
 def start_review(
     run_id: UUID,
 ) -> Run:
@@ -142,6 +253,18 @@ def start_review(
     if run.status != RunStatus.WORKERS_COMPLETED:
         raise InvalidRunTransitionError(
             "Review cannot start before worker work is completed."
+        )
+
+    if (
+        run.project_source == ProjectSource.GITHUB
+        and (
+            run.candidate_test_result is None
+            or not run.candidate_test_result.passed
+        )
+    ):
+        raise InvalidRunTransitionError(
+            "GitHub proposals must pass candidate "
+            "Docker tests before review."
         )
 
     run.status = RunStatus.RUNNING_REVIEWER
@@ -160,6 +283,15 @@ def complete_review(
             "Review is not currently running."
         )
 
+    if (
+        run.review_rounds_completed
+        >= run.max_review_rounds
+    ):
+        raise InvalidRunTransitionError(
+            "No review rounds remain."
+        )
+
+    run.review_rounds_completed += 1
     run.reviewer_result = reviewer_result
     run.status = RunStatus.AWAITING_FINAL_APPROVAL
 

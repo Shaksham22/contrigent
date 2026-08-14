@@ -13,3 +13,10 @@
 - Treat file path, reason, worker findings, and other labels as metadata only.
 - Only text between REPLACEMENT CONTENT START and REPLACEMENT CONTENT END represents the proposed file contents.
 - Never report metadata text as a syntax or source-code defect.
+- During a re-review, treat previous reviewer findings as context, not binding conclusions.
+- Independently reassess previous findings against the current proposal, original issue, and repository evidence.
+- Verify whether valid previous concerns were addressed, but do not repeat a previous finding merely because it appeared in the earlier review.
+- Check the revised proposal for new problems introduced during remediation.
+- Treat supplied candidate Docker test results as deterministic execution evidence.
+- Do not claim tests passed unless the supplied candidate test result says they passed.
+- A passing test suite does not replace independent correctness, scope, and coverage review.

@@ -15,6 +15,10 @@ from contrigent_api.services.docker_runtime_manager import (
     DockerRuntimeSession,
 )
 
+from contrigent_api.models.worker_result import (
+    FileReplacement,
+)
+
 
 @pytest.fixture(autouse=True)
 def disable_real_docker_management(
@@ -288,3 +292,85 @@ def test_repository_test_progress_is_reported(
             "Processing test results",
         ),
     ]
+
+def test_candidate_files_are_overlaid_before_dependency_setup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = create_uv_test_repository(
+        tmp_path
+    )
+
+    commands: list[list[str]] = []
+
+    def fake_run(
+        command: list[str],
+        **_kwargs,
+    ) -> subprocess.CompletedProcess[str]:
+        commands.append(
+            command
+        )
+
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=(
+                "Dependencies ready."
+                if len(commands) == 1
+                else "10 passed"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        repository_test_runner.subprocess,
+        "run",
+        fake_run,
+    )
+
+    result = run_repository_tests(
+        repository,
+        proposed_files=[
+            FileReplacement(
+                file_path="src/example.py",
+                reason="Candidate implementation.",
+                replacement_content=(
+                    "VALUE = 2\n"
+                ),
+            )
+        ],
+    )
+
+    assert result.passed is True
+
+    dependency_shell_command = (
+        commands[0][-1]
+    )
+
+    assert (
+        "cp -a /workspace/. "
+        "/test-environment/workspace/"
+        in dependency_shell_command
+    )
+
+    assert (
+        "cp -a "
+        "/test-environment/candidate-overrides/. "
+        "/test-environment/workspace/"
+        in dependency_shell_command
+    )
+
+    workspace_mount = next(
+        commands[0][index + 1]
+        for index, value
+        in enumerate(commands[0])
+        if (
+            value == "--mount"
+            and "/workspace"
+            in commands[0][index + 1]
+        )
+    )
+
+    assert workspace_mount.endswith(
+        ",readonly"
+    )

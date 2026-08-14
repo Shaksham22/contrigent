@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[5]
@@ -17,6 +18,8 @@ DOWNLOADED_GITHUB_PROJECTS_FOLDER = (
     / "downloaded_github_projects"
 )
 
+FORK_READY_TIMEOUT_SECONDS = 120
+FORK_READY_CHECK_INTERVAL_SECONDS = 2
 
 class GitHubProjectDownloadError(RuntimeError):
     pass
@@ -209,10 +212,32 @@ def build_github_api_headers() -> dict[str, str]:
 
 def fetch_github_json(
     api_url: str,
+    *,
+    method: str = "GET",
+    body: dict | None = None,
+    allow_not_found: bool = False,
 ):
+    request_data = None
+
+    if body is not None:
+        request_data = json.dumps(
+            body
+        ).encode(
+            "utf-8"
+        )
+
+    headers = build_github_api_headers()
+
+    if request_data is not None:
+        headers["Content-Type"] = (
+            "application/json"
+        )
+
     request = Request(
         api_url,
-        headers=build_github_api_headers(),
+        data=request_data,
+        headers=headers,
+        method=method,
     )
 
     try:
@@ -227,8 +252,20 @@ def fetch_github_json(
             )
 
     except HTTPError as error:
+        if (
+            allow_not_found
+            and error.code == 404
+        ):
+            return None
+
+        details = error.read().decode(
+            "utf-8",
+            errors="replace",
+        )
+
         raise GitHubProjectDownloadError(
-            f"GitHub API returned HTTP {error.code}."
+            f"GitHub API returned HTTP {error.code}: "
+            f"{details[:500]}"
         ) from error
 
     except URLError as error:
@@ -236,6 +273,51 @@ def fetch_github_json(
             f"Could not connect to GitHub: {error.reason}"
         ) from error
 
+def require_github_token() -> str:
+    token = os.getenv(
+        "GITHUB_TOKEN",
+        "",
+    ).strip()
+
+    if not token:
+        raise GitHubProjectDownloadError(
+            "GITHUB_TOKEN is required for "
+            "GitHub fork operations."
+        )
+
+    return token
+
+
+def get_authenticated_github_user() -> str:
+    require_github_token()
+
+    user = fetch_github_json(
+        "https://api.github.com/user"
+    )
+
+    if not isinstance(
+        user,
+        dict,
+    ):
+        raise GitHubProjectDownloadError(
+            "GitHub returned an unexpected "
+            "authenticated-user response."
+        )
+
+    login = user.get(
+        "login"
+    )
+
+    if (
+        not isinstance(login, str)
+        or not login.strip()
+    ):
+        raise GitHubProjectDownloadError(
+            "GitHub did not return the "
+            "authenticated user's login."
+        )
+
+    return login
 
 def fetch_all_issue_comments(
     owner: str,
@@ -460,9 +542,20 @@ def download_github_project(
             encoding="utf-8",
         )
 
+        fork_repository_url = (
+            get_or_create_fork_repository_url(
+                repository_url
+            )
+        )
+
         clone_github_repository(
-            repository_url,
+            fork_repository_url,
             repository_folder,
+        )
+
+        add_upstream_remote(
+            repository_folder,
+            repository_url,
         )
 
     except Exception:
@@ -543,3 +636,239 @@ def get_or_download_github_project(
         issue_url,
         repository_url,
     )
+
+def get_existing_fork_url(
+    upstream_repository_url: str,
+    fork_owner: str,
+) -> str | None:
+    upstream_owner, repository = (
+        parse_github_repository_url(
+            upstream_repository_url
+        )
+    )
+
+    fork = fetch_github_json(
+        (
+            "https://api.github.com/repos/"
+            f"{fork_owner}/{repository}"
+        ),
+        allow_not_found=True,
+    )
+
+    if fork is None:
+        return None
+
+    if not isinstance(
+        fork,
+        dict,
+    ):
+        raise GitHubProjectDownloadError(
+            "GitHub returned an unexpected "
+            "fork response."
+        )
+
+    if fork.get("fork") is not True:
+        raise GitHubProjectDownloadError(
+            f"{fork_owner}/{repository} already "
+            "exists but is not a fork."
+        )
+
+    parent = fork.get(
+        "parent"
+    )
+
+    if not isinstance(
+        parent,
+        dict,
+    ):
+        raise GitHubProjectDownloadError(
+            "Existing fork is missing "
+            "parent repository information."
+        )
+
+    expected_parent = (
+        f"{upstream_owner}/{repository}"
+    )
+
+    parent_name = parent.get(
+        "full_name"
+    )
+
+    if (
+        not isinstance(parent_name, str)
+        or parent_name.casefold()
+        != expected_parent.casefold()
+    ):
+        raise GitHubProjectDownloadError(
+            "Existing fork does not belong "
+            "to the supplied upstream repository."
+        )
+
+    clone_url = fork.get(
+        "clone_url"
+    )
+
+    if (
+        not isinstance(clone_url, str)
+        or not clone_url
+    ):
+        raise GitHubProjectDownloadError(
+            "Existing fork does not have "
+            "a clone URL."
+        )
+
+    return clone_url
+
+
+def create_github_fork(
+    upstream_repository_url: str,
+) -> str:
+    upstream_owner, repository = (
+        parse_github_repository_url(
+            upstream_repository_url
+        )
+    )
+
+    fork = fetch_github_json(
+        (
+            "https://api.github.com/repos/"
+            f"{upstream_owner}/"
+            f"{repository}/forks"
+        ),
+        method="POST",
+        body={},
+    )
+
+    if not isinstance(
+        fork,
+        dict,
+    ):
+        raise GitHubProjectDownloadError(
+            "GitHub returned an unexpected "
+            "fork creation response."
+        )
+
+    clone_url = fork.get(
+        "clone_url"
+    )
+
+    if (
+        not isinstance(clone_url, str)
+        or not clone_url
+    ):
+        raise GitHubProjectDownloadError(
+            "GitHub accepted the fork request "
+            "but did not return a clone URL."
+        )
+
+    return clone_url
+
+
+def fork_repository_is_ready(
+    fork_repository_url: str,
+) -> bool:
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "ls-remote",
+                fork_repository_url,
+                "HEAD",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+    except subprocess.TimeoutExpired:
+        return False
+
+    return (
+        result.returncode == 0
+        and bool(
+            result.stdout.strip()
+        )
+    )
+
+
+def wait_for_github_fork(
+    fork_repository_url: str,
+) -> None:
+    deadline = (
+        time.monotonic()
+        + FORK_READY_TIMEOUT_SECONDS
+    )
+
+    while time.monotonic() < deadline:
+        if fork_repository_is_ready(
+            fork_repository_url
+        ):
+            return
+
+        time.sleep(
+            FORK_READY_CHECK_INTERVAL_SECONDS
+        )
+
+    raise GitHubProjectDownloadError(
+        "GitHub created the fork but its "
+        "Git repository did not become ready "
+        f"within {FORK_READY_TIMEOUT_SECONDS} seconds."
+    )
+
+def get_or_create_fork_repository_url(
+    upstream_repository_url: str,
+) -> str:
+    require_github_token()
+
+    fork_owner = (
+        get_authenticated_github_user()
+    )
+
+    fork_repository_url = (
+        get_existing_fork_url(
+            upstream_repository_url,
+            fork_owner,
+        )
+    )
+
+    if fork_repository_url is None:
+        fork_repository_url = (
+            create_github_fork(
+                upstream_repository_url
+            )
+        )
+
+    wait_for_github_fork(
+        fork_repository_url
+    )
+
+    return fork_repository_url
+
+
+def add_upstream_remote(
+    repository_folder: Path,
+    upstream_repository_url: str,
+) -> None:
+    result = subprocess.run(
+        [
+            "git",
+            "remote",
+            "add",
+            "upstream",
+            upstream_repository_url,
+        ],
+        cwd=repository_folder,
+        capture_output=True,
+        text=True,
+    )
+
+    if result.returncode != 0:
+        message = (
+            result.stderr.strip()
+            or result.stdout.strip()
+            or "Could not add upstream Git remote."
+        )
+
+        raise GitHubProjectDownloadError(
+            message
+        )

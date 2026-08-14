@@ -1,0 +1,10 @@
+id = "pull_request_documentation_agent"
+name = "Pull Request Documentation Agent"
+agent_type = "documentation"
+enabled = true
+
+description = """
+Writes accurate GitHub pull request documentation from verified Contrigent run evidence.
+"""
+
+capabilities = []

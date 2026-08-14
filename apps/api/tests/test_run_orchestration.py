@@ -1,0 +1,686 @@
+from pathlib import Path
+
+import pytest
+
+from contrigent_api.agents.independent_reviewer.output_schema import (
+    ReviewerResult,
+)
+from contrigent_api.agents.issue_analyzer.output_schema import (
+    Feasibility,
+    ImplementationStep,
+    IssueAnalysis,
+)
+from contrigent_api.models.project_context import (
+    ProjectContext,
+    ProjectSource,
+)
+from contrigent_api.models.repository_test_result import (
+    RepositoryTestResult,
+)
+from contrigent_api.models.run_record import (
+    RunStatus,
+)
+from contrigent_api.models.worker_result import (
+    FileReplacement,
+    WorkerResult,
+)
+from contrigent_api.routes import (
+    run_routes,
+)
+from contrigent_api.services.run_memory_store import (
+    attach_analysis,
+    clear_runs,
+    create_run,
+)
+
+
+@pytest.fixture(autouse=True)
+def reset_run_store() -> None:
+    clear_runs()
+
+
+def make_analysis(
+    summary: str,
+) -> IssueAnalysis:
+    return IssueAnalysis(
+        summary=summary,
+        acceptance_criteria=[
+            "Fix the reported behavior."
+        ],
+        ambiguities=[],
+        repository_instructions=[],
+        likely_files=[
+            "src/example.py",
+            "tests/test_example.py",
+        ],
+        risks=[],
+        feasibility=Feasibility.FEASIBLE,
+        worker_assignments=[],
+        implementation_plan=[
+            ImplementationStep(
+                order=1,
+                description=summary,
+            )
+        ],
+    )
+
+
+def make_project(
+    repository_path: Path,
+) -> ProjectContext:
+    return ProjectContext(
+        project_name="example",
+        project_source=(
+            ProjectSource.GITHUB
+        ),
+        repository_path=repository_path,
+        issue="Fix issue #1.",
+        readme="Example repository.",
+        contributing="Run tests.",
+        files={
+            "src/example.py": (
+                "VALUE = 1\n"
+            ),
+            "tests/test_example.py": (
+                "def test_value(): pass\n"
+            ),
+        },
+    )
+
+
+def make_test_result(
+    passed: bool,
+) -> RepositoryTestResult:
+    return RepositoryTestResult(
+        passed=passed,
+        stage="tests",
+        command=[
+            "pytest"
+        ],
+        exit_code=(
+            0 if passed else 1
+        ),
+        duration_seconds=0.1,
+        stdout=(
+            "2 passed"
+            if passed
+            else "1 failed, 1 passed"
+        ),
+        stderr="",
+    )
+
+
+def make_worker_result(
+    summary: str,
+) -> tuple[
+    dict[str, WorkerResult],
+    list[FileReplacement],
+]:
+    replacement = FileReplacement(
+        file_path="src/example.py",
+        reason=summary,
+        replacement_content=(
+            f"# {summary}\n"
+            "VALUE = 2\n"
+        ),
+    )
+
+    return (
+        {
+            "python_solver": WorkerResult(
+                summary=summary,
+                findings=[],
+                files_to_replace=[
+                    replacement
+                ],
+            )
+        },
+        [
+            replacement
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_failed_candidate_tests_return_to_manager_and_workers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = make_project(
+        tmp_path
+    )
+
+    initial_analysis = make_analysis(
+        "Initial plan."
+    )
+
+    revised_analysis = make_analysis(
+        "Fix the Docker failure."
+    )
+
+    run = create_run(
+        "example",
+        ProjectSource.GITHUB,
+        github_issue_url=(
+            "https://github.com/example/demo/issues/1"
+        ),
+        github_repository_url=(
+            "https://github.com/example/demo"
+        ),
+        max_review_rounds=1,
+        max_testing_rounds=2,
+    )
+
+    attach_analysis(
+        run.id,
+        initial_analysis,
+    )
+
+    monkeypatch.setattr(
+        run_routes,
+        "load_project",
+        lambda *_args: project,
+    )
+
+    worker_calls = 0
+
+    async def fake_run_assigned_workers(
+        *_args,
+        **_kwargs,
+    ):
+        nonlocal worker_calls
+        worker_calls += 1
+
+        return make_worker_result(
+            f"worker attempt {worker_calls}"
+        )
+
+    monkeypatch.setattr(
+        run_routes,
+        "run_assigned_workers",
+        fake_run_assigned_workers,
+    )
+
+    test_results = iter(
+        [
+            make_test_result(
+                False
+            ),
+            make_test_result(
+                True
+            ),
+        ]
+    )
+
+    monkeypatch.setattr(
+        run_routes,
+        "run_repository_tests",
+        lambda *_args, **_kwargs: next(
+            test_results
+        ),
+    )
+
+    test_replans = 0
+
+    async def fake_replan_after_test_failure(
+        *_args,
+        **_kwargs,
+    ):
+        nonlocal test_replans
+        test_replans += 1
+
+        return (
+            revised_analysis,
+            None,
+        )
+
+    monkeypatch.setattr(
+        run_routes,
+        "replan_after_test_failure",
+        fake_replan_after_test_failure,
+    )
+
+    reviewer_calls = 0
+
+    async def fake_run_reviewer(
+        *_args,
+        **_kwargs,
+    ) -> ReviewerResult:
+        nonlocal reviewer_calls
+        reviewer_calls += 1
+
+        return ReviewerResult(
+            recommendation="approve",
+            summary="Approved.",
+            findings=[],
+            files_reviewed=[
+                "src/example.py"
+            ],
+        )
+
+    monkeypatch.setattr(
+        run_routes,
+        "run_reviewer",
+        fake_run_reviewer,
+    )
+
+    result = (
+        await run_routes.approve_run_plan(
+            run.id
+        )
+    )
+
+    assert (
+        result.status
+        == RunStatus.AWAITING_FINAL_APPROVAL
+    )
+
+    assert (
+        result.testing_rounds_completed
+        == 2
+    )
+
+    assert (
+        result.review_rounds_completed
+        == 1
+    )
+
+    assert (
+        result.candidate_test_result
+        is not None
+    )
+
+    assert (
+        result.candidate_test_result.passed
+        is True
+    )
+
+    assert worker_calls == 2
+    assert test_replans == 1
+    assert reviewer_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_reviewer_rejection_replans_retests_and_reviews_again(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = make_project(
+        tmp_path
+    )
+
+    initial_analysis = make_analysis(
+        "Initial plan."
+    )
+
+    revised_analysis = make_analysis(
+        "Address reviewer feedback."
+    )
+
+    run = create_run(
+        "example",
+        ProjectSource.GITHUB,
+        github_issue_url=(
+            "https://github.com/example/demo/issues/1"
+        ),
+        github_repository_url=(
+            "https://github.com/example/demo"
+        ),
+        max_review_rounds=2,
+        max_testing_rounds=2,
+    )
+
+    attach_analysis(
+        run.id,
+        initial_analysis,
+    )
+
+    monkeypatch.setattr(
+        run_routes,
+        "load_project",
+        lambda *_args: project,
+    )
+
+    worker_calls = 0
+
+    async def fake_run_assigned_workers(
+        *_args,
+        **_kwargs,
+    ):
+        nonlocal worker_calls
+        worker_calls += 1
+
+        return make_worker_result(
+            f"worker attempt {worker_calls}"
+        )
+
+    monkeypatch.setattr(
+        run_routes,
+        "run_assigned_workers",
+        fake_run_assigned_workers,
+    )
+
+    test_calls = 0
+
+    def fake_run_repository_tests(
+        *_args,
+        **_kwargs,
+    ) -> RepositoryTestResult:
+        nonlocal test_calls
+        test_calls += 1
+
+        return make_test_result(
+            True
+        )
+
+    monkeypatch.setattr(
+        run_routes,
+        "run_repository_tests",
+        fake_run_repository_tests,
+    )
+
+    review_results = iter(
+        [
+            ReviewerResult(
+                recommendation=(
+                    "changes_required"
+                ),
+                summary=(
+                    "Revise the implementation."
+                ),
+                findings=[],
+                files_reviewed=[
+                    "src/example.py"
+                ],
+            ),
+            ReviewerResult(
+                recommendation="approve",
+                summary=(
+                    "Approved after revision."
+                ),
+                findings=[],
+                files_reviewed=[
+                    "src/example.py"
+                ],
+            ),
+        ]
+    )
+
+    reviewer_calls = 0
+
+    async def fake_run_reviewer(
+        *_args,
+        **_kwargs,
+    ) -> ReviewerResult:
+        nonlocal reviewer_calls
+        reviewer_calls += 1
+
+        return next(
+            review_results
+        )
+
+    monkeypatch.setattr(
+        run_routes,
+        "run_reviewer",
+        fake_run_reviewer,
+    )
+
+    review_replans = 0
+
+    async def fake_replan_after_review(
+        *_args,
+        **_kwargs,
+    ):
+        nonlocal review_replans
+        review_replans += 1
+
+        return (
+            revised_analysis,
+            None,
+        )
+
+    monkeypatch.setattr(
+        run_routes,
+        "replan_after_review",
+        fake_replan_after_review,
+    )
+
+    result = (
+        await run_routes.approve_run_plan(
+            run.id
+        )
+    )
+
+    assert (
+        result.status
+        == RunStatus.AWAITING_FINAL_APPROVAL
+    )
+
+    assert (
+        result.testing_rounds_completed
+        == 2
+    )
+
+    assert (
+        result.review_rounds_completed
+        == 2
+    )
+
+    assert (
+        result.reviewer_result
+        is not None
+    )
+
+    assert (
+        result.reviewer_result.recommendation
+        == "approve"
+    )
+
+    assert worker_calls == 2
+    assert test_calls == 2
+    assert reviewer_calls == 2
+    assert review_replans == 1
+
+
+@pytest.mark.asyncio
+async def test_review_limit_stops_automatic_rework(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = make_project(
+        tmp_path
+    )
+
+    analysis = make_analysis(
+        "Initial plan."
+    )
+
+    run = create_run(
+        "example",
+        ProjectSource.GITHUB,
+        github_issue_url=(
+            "https://github.com/example/demo/issues/1"
+        ),
+        github_repository_url=(
+            "https://github.com/example/demo"
+        ),
+        max_review_rounds=1,
+        max_testing_rounds=2,
+    )
+
+    attach_analysis(
+        run.id,
+        analysis,
+    )
+
+    monkeypatch.setattr(
+        run_routes,
+        "load_project",
+        lambda *_args: project,
+    )
+
+    async def fake_run_assigned_workers(
+        *_args,
+        **_kwargs,
+    ):
+        return make_worker_result(
+            "initial candidate"
+        )
+
+    monkeypatch.setattr(
+        run_routes,
+        "run_assigned_workers",
+        fake_run_assigned_workers,
+    )
+
+    monkeypatch.setattr(
+        run_routes,
+        "run_repository_tests",
+        lambda *_args, **_kwargs: (
+            make_test_result(
+                True
+            )
+        ),
+    )
+
+    async def fake_run_reviewer(
+        *_args,
+        **_kwargs,
+    ) -> ReviewerResult:
+        return ReviewerResult(
+            recommendation=(
+                "changes_required"
+            ),
+            summary=(
+                "Still needs work."
+            ),
+            findings=[],
+            files_reviewed=[
+                "src/example.py"
+            ],
+        )
+
+    monkeypatch.setattr(
+        run_routes,
+        "run_reviewer",
+        fake_run_reviewer,
+    )
+
+    result = (
+        await run_routes.approve_run_plan(
+            run.id
+        )
+    )
+
+    assert (
+        result.status
+        == RunStatus.AWAITING_FINAL_APPROVAL
+    )
+
+    assert (
+        result.review_rounds_completed
+        == 1
+    )
+
+    assert (
+        result.reviewer_result
+        is not None
+    )
+
+    assert (
+        result.reviewer_result.recommendation
+        == "changes_required"
+    )
+
+
+@pytest.mark.asyncio
+async def test_testing_limit_stops_before_review(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = make_project(
+        tmp_path
+    )
+
+    analysis = make_analysis(
+        "Initial plan."
+    )
+
+    run = create_run(
+        "example",
+        ProjectSource.GITHUB,
+        github_issue_url=(
+            "https://github.com/example/demo/issues/1"
+        ),
+        github_repository_url=(
+            "https://github.com/example/demo"
+        ),
+        max_review_rounds=2,
+        max_testing_rounds=1,
+    )
+
+    attach_analysis(
+        run.id,
+        analysis,
+    )
+
+    monkeypatch.setattr(
+        run_routes,
+        "load_project",
+        lambda *_args: project,
+    )
+
+    async def fake_run_assigned_workers(
+        *_args,
+        **_kwargs,
+    ):
+        return make_worker_result(
+            "initial candidate"
+        )
+
+    monkeypatch.setattr(
+        run_routes,
+        "run_assigned_workers",
+        fake_run_assigned_workers,
+    )
+
+    monkeypatch.setattr(
+        run_routes,
+        "run_repository_tests",
+        lambda *_args, **_kwargs: (
+            make_test_result(
+                False
+            )
+        ),
+    )
+
+    result = (
+        await run_routes.approve_run_plan(
+            run.id
+        )
+    )
+
+    assert (
+        result.status
+        == RunStatus.FAILED
+    )
+
+    assert (
+        result.testing_rounds_completed
+        == 1
+    )
+
+    assert (
+        result.candidate_test_result
+        is not None
+    )
+
+    assert (
+        result.candidate_test_result.passed
+        is False
+    )
+
+    assert (
+        result.review_rounds_completed
+        == 0
+    )

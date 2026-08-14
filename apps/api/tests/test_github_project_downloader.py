@@ -123,6 +123,20 @@ def test_download_cleans_up_after_failure(
         "fetch_all_issue_comments",
         lambda *_args: [],
     )
+    monkeypatch.setattr(
+    github_project_downloader,
+    "get_or_create_fork_repository_url",
+    lambda _url: (
+        "https://github.com/"
+        "contributor/demo.git"
+    ),
+)
+
+    monkeypatch.setattr(
+        github_project_downloader,
+        "add_upstream_remote",
+        lambda *_args: None,
+    )
 
     def fail_clone(
         repository_url: str,
@@ -155,3 +169,126 @@ def test_download_cleans_up_after_failure(
         tmp_path
         / "example-demo-issue-1"
     ).exists()
+
+
+def test_existing_fork_is_reused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        github_project_downloader,
+        "require_github_token",
+        lambda: "test-token",
+    )
+
+    monkeypatch.setattr(
+        github_project_downloader,
+        "get_authenticated_github_user",
+        lambda: "contributor",
+    )
+
+    monkeypatch.setattr(
+        github_project_downloader,
+        "get_existing_fork_url",
+        lambda *_args: (
+            "https://github.com/"
+            "contributor/demo.git"
+        ),
+    )
+
+    def unexpected_create(
+        *_args,
+    ) -> str:
+        raise AssertionError(
+            "Existing fork should be reused."
+        )
+
+    monkeypatch.setattr(
+        github_project_downloader,
+        "create_github_fork",
+        unexpected_create,
+    )
+
+    waited_for: list[str] = []
+
+    monkeypatch.setattr(
+        github_project_downloader,
+        "wait_for_github_fork",
+        lambda url: waited_for.append(
+            url
+        ),
+    )
+
+    result = (
+        github_project_downloader
+        .get_or_create_fork_repository_url(
+            "https://github.com/upstream/demo"
+        )
+    )
+
+    assert result == (
+        "https://github.com/"
+        "contributor/demo.git"
+    )
+
+    assert waited_for == [
+        "https://github.com/"
+        "contributor/demo.git"
+    ]
+
+
+def test_missing_fork_is_created(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        github_project_downloader,
+        "require_github_token",
+        lambda: "test-token",
+    )
+
+    monkeypatch.setattr(
+        github_project_downloader,
+        "get_authenticated_github_user",
+        lambda: "contributor",
+    )
+
+    monkeypatch.setattr(
+        github_project_downloader,
+        "get_existing_fork_url",
+        lambda *_args: None,
+    )
+
+    monkeypatch.setattr(
+        github_project_downloader,
+        "create_github_fork",
+        lambda _url: (
+            "https://github.com/"
+            "contributor/demo.git"
+        ),
+    )
+
+    waited_for: list[str] = []
+
+    monkeypatch.setattr(
+        github_project_downloader,
+        "wait_for_github_fork",
+        lambda url: waited_for.append(
+            url
+        ),
+    )
+
+    result = (
+        github_project_downloader
+        .get_or_create_fork_repository_url(
+            "https://github.com/upstream/demo"
+        )
+    )
+
+    assert result == (
+        "https://github.com/"
+        "contributor/demo.git"
+    )
+
+    assert waited_for == [
+        "https://github.com/"
+        "contributor/demo.git"
+    ]

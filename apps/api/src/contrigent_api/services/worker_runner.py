@@ -13,6 +13,10 @@ from contrigent_api.models.worker_result import (
 from contrigent_api.models.project_context import (
     ProjectContext,
 )
+
+from contrigent_api.models.repository_test_result import (
+    RepositoryTestResult,
+)
 from contrigent_api.services.worker_discovery import (
     discover_workers,
 )
@@ -120,6 +124,79 @@ def remove_unchanged_replacements(
         findings=worker_result.findings,
         files_to_replace=changed_files,
     )
+def build_project_with_proposed_files(
+    sample_project: ProjectContext,
+    proposed_files: list[FileReplacement],
+) -> ProjectContext:
+    candidate_files = dict(
+        sample_project.files
+    )
+
+    for replacement in proposed_files:
+        safe_path = validate_replacement_path(
+            replacement.file_path
+        )
+
+        candidate_files[safe_path] = (
+            replacement.replacement_content
+        )
+
+    return ProjectContext(
+        project_name=sample_project.project_name,
+        project_source=sample_project.project_source,
+        repository_path=sample_project.repository_path,
+        issue=sample_project.issue,
+        readme=sample_project.readme,
+        contributing=sample_project.contributing,
+        files=candidate_files,
+    )
+
+
+def merge_proposed_files(
+    original_project: ProjectContext,
+    existing_proposed_files: list[FileReplacement],
+    revised_proposed_files: list[FileReplacement],
+) -> list[FileReplacement]:
+    final_files_by_path: dict[
+        str,
+        FileReplacement,
+    ] = {}
+
+    for replacement in (
+        existing_proposed_files
+        + revised_proposed_files
+    ):
+        safe_path = validate_replacement_path(
+            replacement.file_path
+        )
+
+        final_files_by_path[safe_path] = (
+            FileReplacement(
+                file_path=safe_path,
+                reason=replacement.reason,
+                replacement_content=(
+                    replacement.replacement_content
+                ),
+            )
+        )
+
+    final_files: list[FileReplacement] = []
+
+    for replacement in final_files_by_path.values():
+        original_content = original_project.files.get(
+            replacement.file_path
+        )
+
+        if (
+            original_content is not None
+            and original_content
+            == replacement.replacement_content
+        ):
+            continue
+
+        final_files.append(replacement)
+
+    return final_files
 
 
 def build_worker_input(
@@ -128,6 +205,9 @@ def build_worker_input(
     shared_worker_results: dict[str, WorkerResult],
     sample_project: ProjectContext,
     issue_analysis: IssueAnalysis,
+    candidate_test_result: (
+        RepositoryTestResult | None
+    ) = None,
 ) -> str:
     worker = get_available_worker(
         worker_id
@@ -155,6 +235,18 @@ def build_worker_input(
             "No earlier worker results were assigned to you."
         )
 
+    if candidate_test_result is None:
+        candidate_test_text = (
+            "No candidate Docker test result "
+            "was supplied."
+        )
+    else:
+        candidate_test_text = (
+            candidate_test_result.model_dump_json(
+                indent=2
+            )
+        )
+
     return f"""
 === ASSIGNED WORKER ===
 Worker ID: {worker["id"]}
@@ -167,6 +259,9 @@ Capabilities: {capabilities or "None listed"}
 
 === RESULTS SHARED BY MANAGER ===
 {shared_results}
+
+=== CANDIDATE DOCKER TEST RESULT ===
+{candidate_test_text}
 
 === ORIGINAL GITHUB ISSUE ===
 {sample_project.issue}
@@ -191,6 +286,9 @@ async def run_worker(
     shared_worker_results: dict[str, WorkerResult],
     sample_project: ProjectContext,
     issue_analysis: IssueAnalysis,
+    candidate_test_result: (
+        RepositoryTestResult | None
+    ) = None,
 ) -> WorkerResult:
     worker_agent = load_worker_agent(
         worker_id
@@ -202,6 +300,7 @@ async def run_worker(
         shared_worker_results,
         sample_project,
         issue_analysis,
+        candidate_test_result,
     )
 
     result = await Runner.run(
@@ -227,6 +326,9 @@ async def run_worker(
 async def run_assigned_workers(
     sample_project: ProjectContext,
     issue_analysis: IssueAnalysis,
+    candidate_test_result: (
+        RepositoryTestResult | None
+    ) = None,
 ) -> tuple[
     dict[str, WorkerResult],
     list[FileReplacement],
@@ -257,6 +359,7 @@ async def run_assigned_workers(
             shared_worker_results,
             sample_project,
             issue_analysis,
+            candidate_test_result,
         )
 
         worker_results[

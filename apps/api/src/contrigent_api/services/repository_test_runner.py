@@ -7,6 +7,13 @@ from collections.abc import Callable
 from contrigent_api.models.repository_test_result import (
     RepositoryTestResult,
 )
+from contrigent_api.models.worker_result import (
+    FileReplacement,
+)
+from contrigent_api.services.approved_file_applier import (
+    apply_approved_files,
+)
+
 from contrigent_api.services.docker_runtime_manager import (
     DockerRuntimeSession,
     start_docker_runtime_if_needed,
@@ -200,6 +207,7 @@ def report_progress(
 def run_repository_tests(
     repository_path: Path,
     progress_callback: ProgressCallback | None = None,
+    proposed_files: list[FileReplacement] | None = None,
 ) -> RepositoryTestResult:
     report_progress(
     progress_callback,
@@ -262,12 +270,37 @@ def run_repository_tests(
             test_environment_path.chmod(
                 0o777
             )
+            candidate_overlay_command = ""
+
+            if proposed_files:
+                candidate_overrides_path = (
+                    test_environment_path
+                    / "candidate-overrides"
+                )
+
+                apply_approved_files(
+                    candidate_overrides_path,
+                    proposed_files,
+                )
+
+                candidate_overlay_command = (
+                    "cp -a "
+                    "/test-environment/candidate-overrides/. "
+                    "/test-environment/workspace/ && "
+                )
 
             dependency_command = [
-                "uv",
-                "sync",
-                "--locked",
-                "--all-groups",
+                "sh",
+                "-lc",
+                (
+                    "rm -rf /test-environment/workspace && "
+                    "mkdir -p /test-environment/workspace && "
+                    "cp -a /workspace/. "
+                    "/test-environment/workspace/ && "
+                    f"{candidate_overlay_command}"
+                    "cd /test-environment/workspace && "
+                    "uv sync --locked --all-groups"
+                ),
             ]
 
             dependency_docker_command = (
@@ -325,16 +358,13 @@ def run_repository_tests(
             )
 
             test_command = [
-                "uv",
-                "run",
-                "--offline",
-                "--no-sync",
-                "python",
-                "-m",
-                "pytest",
-                "-v",
-                "-p",
-                "no:cacheprovider",
+                "sh",
+                "-lc",
+                (
+                    "cd /test-environment/workspace && "
+                    "uv run --offline --no-sync "
+                    "python -m pytest -v -p no:cacheprovider"
+                ),
             ]
 
             test_docker_command = (

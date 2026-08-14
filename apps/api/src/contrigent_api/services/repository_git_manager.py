@@ -1,7 +1,9 @@
 from pathlib import Path
 from uuid import UUID
 import subprocess
-
+from contrigent_api.services.github_project_downloader import (
+    parse_github_repository_url,
+)
 
 class RepositoryGitError(RuntimeError):
     pass
@@ -86,10 +88,48 @@ def get_current_branch(
 
     return branch
 
+def get_remote_default_branch(
+    repository_path: Path,
+    remote_name: str,
+) -> str:
+    output = run_git_command(
+        repository_path,
+        "ls-remote",
+        "--symref",
+        remote_name,
+        "HEAD",
+    )
+
+    prefix = "ref: refs/heads/"
+
+    for line in output.splitlines():
+        if not line.startswith(prefix):
+            continue
+
+        reference, separator, target = (
+            line.partition("\t")
+        )
+
+        if (
+            separator
+            and target == "HEAD"
+        ):
+            branch = reference[
+                len(prefix):
+            ]
+
+            if branch:
+                return branch
+
+    raise RepositoryGitError(
+        f"Could not determine the default branch "
+        f"for Git remote '{remote_name}'."
+    )
 
 def create_run_branch(
     repository_path: Path,
     run_id: UUID,
+    base_remote: str | None = None,
 ) -> tuple[str, str]:
     verify_git_repository(
         repository_path
@@ -99,9 +139,34 @@ def create_run_branch(
         repository_path
     )
 
-    original_branch = get_current_branch(
-        repository_path
-    )
+    if base_remote is None:
+        original_branch = get_current_branch(
+            repository_path
+        )
+    else:
+        original_branch = (
+            get_remote_default_branch(
+                repository_path,
+                base_remote,
+            )
+        )
+
+        run_git_command(
+            repository_path,
+            "fetch",
+            base_remote,
+        )
+
+        run_git_command(
+            repository_path,
+            "checkout",
+            "-B",
+            original_branch,
+            (
+                f"{base_remote}/"
+                f"{original_branch}"
+            ),
+        )
 
     run_branch = (
         f"contrigent/{run_id}"
@@ -118,7 +183,6 @@ def create_run_branch(
         original_branch,
         run_branch,
     )
-
 
 def rollback_run_branch(
     repository_path: Path,
@@ -344,9 +408,10 @@ def normalize_github_repository_url(
     return normalized.casefold()
 
 
-def verify_origin_repository(
+def verify_fork_remotes(
     repository_path: Path,
-    expected_repository_url: str,
+    expected_upstream_url: str,
+    expected_fork_owner: str,
 ) -> None:
     origin_url = run_git_command(
         repository_path,
@@ -355,24 +420,61 @@ def verify_origin_repository(
         "origin",
     )
 
+    upstream_url = run_git_command(
+        repository_path,
+        "remote",
+        "get-url",
+        "upstream",
+    )
+
+    (
+        expected_upstream_owner,
+        expected_repository,
+    ) = parse_github_repository_url(
+        expected_upstream_url
+    )
+
+    (
+        actual_upstream_owner,
+        actual_upstream_repository,
+    ) = parse_github_repository_url(
+        upstream_url
+    )
+
+    (
+        actual_fork_owner,
+        actual_fork_repository,
+    ) = parse_github_repository_url(
+        origin_url
+    )
+
     if (
-        normalize_github_repository_url(
-            origin_url
-        )
-        != normalize_github_repository_url(
-            expected_repository_url
-        )
+        actual_upstream_owner.casefold()
+        != expected_upstream_owner.casefold()
+        or actual_upstream_repository.casefold()
+        != expected_repository.casefold()
     ):
         raise RepositoryGitError(
-            "Git origin does not match the GitHub "
-            "repository supplied to Contrigent."
+            "Git upstream does not match "
+            "the repository supplied to Contrigent."
         )
 
+    if (
+        actual_fork_owner.casefold()
+        != expected_fork_owner.casefold()
+        or actual_fork_repository.casefold()
+        != expected_repository.casefold()
+    ):
+        raise RepositoryGitError(
+            "Git origin does not match the "
+            "authenticated user's fork."
+        )
 
 def push_run_branch(
     repository_path: Path,
     branch_name: str,
-    expected_repository_url: str,
+    expected_upstream_url: str,
+    expected_fork_owner: str,
 ) -> None:
     verify_git_repository(
         repository_path
@@ -383,9 +485,10 @@ def push_run_branch(
         branch_name,
     )
 
-    verify_origin_repository(
+    verify_fork_remotes(
         repository_path,
-        expected_repository_url,
+        expected_upstream_url,
+        expected_fork_owner,
     )
 
     run_git_command(

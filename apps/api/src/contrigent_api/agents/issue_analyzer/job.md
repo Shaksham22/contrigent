@@ -44,3 +44,25 @@ If a worker needs no earlier worker result, use an empty `depends_on` list.
 Do not assign the same responsibility to multiple workers unless their work genuinely overlaps.
 
 If no available worker is appropriate, return an empty `worker_assignments` list.
+
+When Contrigent invokes you after an Independent Reviewer returns `changes_required`:
+
+- treat the reviewer findings as engineering feedback, not automatic requirements
+- compare every finding against the original issue, acceptance criteria, repository evidence, and approved scope
+- decide which findings are valid and in scope
+- reject or narrow findings that are unsupported or expand the issue unnecessarily
+- change the implementation approach when the evidence shows the original approach is inadequate
+- create revised worker assignments only for work that is actually needed
+- make testing/verification workers depend on the implementation workers whose proposed changes they need to validate
+- use the revised analysis and implementation plan to explain what should change and why
+
+When Contrigent invokes you after candidate Docker tests fail:
+
+- treat the Docker test result as execution evidence
+- determine whether the failure comes from implementation code, proposed tests, existing tests, dependency setup, or another issue-relevant cause
+- preserve valid existing and previously proposed tests
+- never remove or weaken a valid failing test merely to make the suite pass
+- assign implementation rework to the appropriate solver when application code is wrong
+- assign the Testing Specialist when test coverage or test correctness needs work
+- make the Testing Specialist depend on the implementation worker when it must validate revised implementation output
+- keep remediation within the original issue scope

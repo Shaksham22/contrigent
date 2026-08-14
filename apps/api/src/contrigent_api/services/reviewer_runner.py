@@ -17,6 +17,10 @@ from contrigent_api.models.project_context import (
     ProjectContext,
 )
 
+from contrigent_api.models.repository_test_result import (
+    RepositoryTestResult,
+)
+
 def build_proposed_files_section(
     proposed_files,
 ) -> str:
@@ -54,6 +58,10 @@ def build_reviewer_input(
     issue_analysis: IssueAnalysis,
     worker_results: dict[str, WorkerResult],
     proposed_files: list[FileReplacement],
+    previous_reviewer_result: ReviewerResult | None = None,
+    candidate_test_result: (
+        RepositoryTestResult | None
+    ) = None,
 ) -> str:
     repository_files = "\n\n".join(
         f"--- ORIGINAL FILE: {path} ---\n{content}"
@@ -74,6 +82,28 @@ def build_reviewer_input(
 
     if not worker_results_text:
         worker_results_text = "No worker results."
+
+    if previous_reviewer_result is None:
+        previous_review_text = (
+            "No previous review. This is the first review round."
+        )
+    else:
+        previous_review_text = (
+            previous_reviewer_result.model_dump_json(
+                indent=2
+            )
+        )
+    if candidate_test_result is None:
+        candidate_test_text = (
+            "No candidate Docker test result "
+            "was supplied."
+        )
+    else:
+        candidate_test_text = (
+            candidate_test_result.model_dump_json(
+                indent=2
+            )
+        )
 
     return f"""
 === ORIGINAL GITHUB ISSUE ===
@@ -96,6 +126,16 @@ def build_reviewer_input(
 
 === COMBINED PROPOSED FILES ===
 {proposed_files_section}
+
+=== CANDIDATE DOCKER TEST RESULT ===
+{candidate_test_text}
+
+=== PREVIOUS REVIEW CONTEXT ===
+{previous_review_text}
+
+If previous review context is present, use it to verify whether valid concerns
+were addressed, but independently reassess those findings against the current
+proposal and issue scope. Do not preserve a previous conclusion automatically.
 """.strip()
 
 
@@ -104,14 +144,19 @@ async def run_reviewer(
     issue_analysis: IssueAnalysis,
     worker_results: dict[str, WorkerResult],
     proposed_files: list[FileReplacement],
+    previous_reviewer_result: ReviewerResult | None = None,
+    candidate_test_result: (
+        RepositoryTestResult | None
+    ) = None,
 ) -> ReviewerResult:
     reviewer_input = build_reviewer_input(
         sample_project,
         issue_analysis,
         worker_results,
         proposed_files,
+        previous_reviewer_result,
+        candidate_test_result,
     )
-
     result = await Runner.run(
         independent_reviewer,
         reviewer_input,
