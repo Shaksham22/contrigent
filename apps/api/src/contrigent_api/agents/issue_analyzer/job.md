@@ -45,6 +45,30 @@ Do not assign the same responsibility to multiple workers unless their work genu
 
 If no available worker is appropriate, return an empty `worker_assignments` list.
 
+Before assigning workers, decide whether repository changes are actually needed.
+
+If the reported issue is already satisfied by the current repository, or the issue does not apply to the supplied repository:
+
+- set `feasibility` to `feasible`
+- begin `summary` with `No changes needed:` and clearly explain why
+- include concrete repository evidence supporting that conclusion
+- return an empty `worker_assignments` list
+- return an empty `implementation_plan` list
+- do not invent code changes merely to produce work
+
+If the issue is relevant and appears to describe a real problem, but you cannot identify a sufficiently supported solution from the available repository and issue evidence:
+
+- set `feasibility` to `needs_clarification`
+- begin `summary` with `Solution not found:` and clearly explain the blocker
+- use `ambiguities` to describe the missing, conflicting, or insufficient information
+- return an empty `worker_assignments` list
+- return an empty `implementation_plan` list
+- do not guess at a solution
+
+If changes are required but none of the available workers can perform the required work, set `feasibility` to `needs_clarification`, explain that limitation, and return an empty `worker_assignments` list.
+
+Otherwise, when changes are needed and the work is feasible, assign the appropriate workers normally.
+
 When Contrigent invokes you after an Independent Reviewer returns `changes_required`:
 
 - treat the reviewer findings as engineering feedback, not automatic requirements

@@ -47,6 +47,9 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from contrigent_api.models.run_record import Run
+from contrigent_api.agents.issue_analyzer.output_schema import (
+    Feasibility,
+)
 from contrigent_api.services.issue_analysis_runner import (
     analyze_project,
     replan_after_review,
@@ -62,6 +65,7 @@ from contrigent_api.services.run_memory_store import (
     RunNotFoundError,
     approve_plan,
     attach_analysis,
+    finish_analysis_without_worker_work,
     complete_worker_work,
     create_run,
     fail_run,
@@ -233,10 +237,21 @@ async def start_run(
             )
         )
 
-        return attach_analysis(
+        run = attach_analysis(
             run.id,
             analysis,
         )
+
+        if (
+            analysis.feasibility
+            != Feasibility.FEASIBLE
+            or not analysis.worker_assignments
+        ):
+            return finish_analysis_without_worker_work(
+                run.id
+            )
+
+        return run
 
     except Exception:
         if (

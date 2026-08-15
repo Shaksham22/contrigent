@@ -13,6 +13,7 @@ from contrigent_api.services.run_memory_store import (
     InvalidRunTransitionError,
     approve_plan,
     attach_analysis,
+    finish_analysis_without_worker_work,
     clear_runs,
     complete_worker_work,
     create_run,
@@ -94,6 +95,103 @@ def test_analysis_moves_run_to_awaiting_approval() -> None:
     assert updated_run.status == RunStatus.AWAITING_PLAN_APPROVAL
     assert updated_run.analysis is not None
     assert updated_run.plan_approved is False
+
+def test_no_changes_needed_completes_run() -> None:
+    run = create_run(
+        "python-missing-display-name"
+    )
+
+    analysis = make_analysis().model_copy(
+        update={
+            "summary": (
+                "No changes needed: "
+                "the reported behavior is already correct."
+            ),
+            "worker_assignments": [],
+            "implementation_plan": [],
+            "feasibility": Feasibility.FEASIBLE,
+        }
+    )
+
+    attach_analysis(
+        run.id,
+        analysis,
+    )
+
+    finished_run = (
+        finish_analysis_without_worker_work(
+            run.id
+        )
+    )
+
+    assert (
+        finished_run.status
+        == RunStatus.COMPLETED
+    )
+
+    assert (
+        finished_run.analysis.summary.startswith(
+            "No changes needed:"
+        )
+    )
+
+    assert (
+        finished_run.completed_at
+        is not None
+    )
+
+
+def test_solution_not_found_fails_run() -> None:
+    run = create_run(
+        "python-missing-display-name"
+    )
+
+    analysis = make_analysis().model_copy(
+        update={
+            "summary": (
+                "Solution not found: "
+                "the repository does not provide "
+                "enough evidence for a safe fix."
+            ),
+            "ambiguities": [
+                "Required behavior is not established."
+            ],
+            "worker_assignments": [],
+            "implementation_plan": [],
+            "feasibility": (
+                Feasibility.NEEDS_CLARIFICATION
+            ),
+        }
+    )
+
+    attach_analysis(
+        run.id,
+        analysis,
+    )
+
+    finished_run = (
+        finish_analysis_without_worker_work(
+            run.id
+        )
+    )
+
+    assert (
+        finished_run.status
+        == RunStatus.FAILED
+    )
+
+    assert (
+        finished_run.analysis.summary.startswith(
+            "Solution not found:"
+        )
+    )
+
+    assert (
+        finished_run.analysis.ambiguities
+        == [
+            "Required behavior is not established."
+        ]
+    )
 
 
 def test_plan_can_be_approved_after_analysis() -> None:

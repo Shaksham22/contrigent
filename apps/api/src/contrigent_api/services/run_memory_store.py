@@ -1,7 +1,10 @@
 from datetime import datetime, timezone
 from uuid import UUID
 
-from contrigent_api.agents.issue_analyzer.output_schema import IssueAnalysis
+from contrigent_api.agents.issue_analyzer.output_schema import (
+    Feasibility,
+    IssueAnalysis,
+)
 from contrigent_api.models.run_record import Run, RunStatus
 from contrigent_api.models.worker_result import (
     FileReplacement,
@@ -10,6 +13,7 @@ from contrigent_api.models.worker_result import (
 from contrigent_api.models.repository_test_result import (
     RepositoryTestResult,
 )
+
 
 from contrigent_api.agents.independent_reviewer.output_schema import (
     ReviewerResult,
@@ -78,6 +82,41 @@ def attach_analysis(
 
     return run
 
+def finish_analysis_without_worker_work(
+    run_id: UUID,
+) -> Run:
+    run = get_run(run_id)
+
+    if run.status != RunStatus.AWAITING_PLAN_APPROVAL:
+        raise InvalidRunTransitionError(
+            "Analysis can only finish early before plan approval."
+        )
+
+    if run.analysis is None:
+        raise InvalidRunTransitionError(
+            "Cannot finish analysis without an analysis result."
+        )
+
+    if (
+        run.analysis.feasibility
+        == Feasibility.FEASIBLE
+    ):
+        if run.analysis.worker_assignments:
+            raise InvalidRunTransitionError(
+                "A feasible run with assigned workers "
+                "must continue through plan approval."
+            )
+
+        run.completed_at = datetime.now(
+            timezone.utc
+        )
+        run.status = RunStatus.COMPLETED
+
+        return run
+
+    run.status = RunStatus.FAILED
+
+    return run
 
 def approve_plan(run_id: UUID) -> Run:
     run = get_run(run_id)

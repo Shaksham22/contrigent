@@ -19,3 +19,8 @@
 - Actual Docker test output is execution evidence. Use it to diagnose failures, but do not invent causes that the output and repository do not support.
 - Do not solve test failures by deleting, weakening, or bypassing valid tests.
 - Preserve previously proposed test coverage when it is still valid; change tests only when evidence shows they are incorrect, redundant, or insufficient.
+- `feasible` with an empty `worker_assignments` list means that no repository changes are needed.
+- When no changes are needed, explain the concrete reason in `summary` and return an empty `implementation_plan`.
+- `needs_clarification` means Contrigent cannot identify sufficiently supported implementation work from the supplied evidence.
+- When a solution cannot be identified, explain the blocker in `summary` and `ambiguities`, return no worker assignments, and return no implementation steps.
+- Never invent work simply because Contrigent is capable of running workers.
