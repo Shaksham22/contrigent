@@ -1,0 +1,19 @@
+id = "frontend_solver"
+name = "Frontend Solver"
+agent_type = "worker"
+enabled = true
+
+description = """
+Handles frontend implementation work across JavaScript, TypeScript, React, HTML, CSS, components, browser-facing logic, state, and UI behavior.
+"""
+
+capabilities = [
+    "frontend",
+    "javascript",
+    "typescript",
+    "react",
+    "html",
+    "css",
+    "browser_ui",
+    "frontend_state"
+]

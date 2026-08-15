@@ -1,0 +1,19 @@
+id = "configuration_specialist"
+name = "Configuration Specialist"
+agent_type = "worker"
+enabled = true
+
+description = """
+Handles project configuration, packaging, build and test configuration, CI workflows, Dockerfiles, and development tooling configuration required by an issue.
+"""
+
+capabilities = [
+    "configuration",
+    "packaging",
+    "build_tools",
+    "test_configuration",
+    "ci",
+    "github_actions",
+    "dockerfile",
+    "development_tooling"
+]

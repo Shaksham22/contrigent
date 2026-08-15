@@ -1,0 +1,19 @@
+id = "database_solver"
+name = "Database Solver"
+agent_type = "worker"
+enabled = true
+
+description = """
+Handles database and persistence-layer work including SQL, ORM logic, schemas, migrations, transactions, data integrity, and query behavior.
+"""
+
+capabilities = [
+    "database",
+    "sql",
+    "orm",
+    "migrations",
+    "transactions",
+    "data_integrity",
+    "persistence",
+    "query_logic"
+]

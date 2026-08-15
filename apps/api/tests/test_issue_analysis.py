@@ -42,6 +42,15 @@ def test_build_analysis_input_contains_repository_context() -> None:
     assert "All behavioral changes must include automated tests" in agent_input
     assert "src/users.py" in agent_input
     assert "display_name.upper()" in agent_input
+    assert (
+        "=== REPOSITORY FILE TREE ==="
+        in agent_input
+    )
+
+    assert (
+        "=== SELECTED REPOSITORY FILE CONTENT ==="
+        in agent_input
+    )
     
 def test_unavailable_required_worker_is_rejected() -> None:
     workers = [

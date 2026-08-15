@@ -1,5 +1,9 @@
 from agents import Runner
 
+from contrigent_api.services.repository_context_builder import (
+    build_repository_context,
+)
+
 from contrigent_api.agents.independent_reviewer.output_schema import (
     ReviewerResult,
 )
@@ -66,9 +70,11 @@ def build_analysis_input(
     project: ProjectContext,
     workers: list[dict],
 ) -> str:
-    repository_files = "\n\n".join(
-        f"--- FILE: {path} ---\n{content}"
-        for path, content in project.files.items()
+    repository_context = (
+        build_repository_context(
+            project.files,
+            query_text=project.issue,
+        )
     )
 
     available_workers = (
@@ -90,10 +96,9 @@ def build_analysis_input(
 === CONTRIBUTING INSTRUCTIONS ===
 {project.contributing}
 
-=== REPOSITORY FILES ===
-{repository_files}
+=== REPOSITORY CONTEXT ===
+{repository_context}
 """.strip()
-
 
 def validate_worker_assignments(
     worker_assignments: list[WorkerAssignment],
@@ -226,9 +231,34 @@ def build_revision_input(
         RepositoryTestResult | None
     ) = None,
 ) -> str:
-    repository_files = "\n\n".join(
-        f"--- FILE: {path} ---\n{content}"
-        for path, content in project.files.items()
+    preferred_paths = [
+        *original_analysis.likely_files,
+        *[
+            replacement.file_path
+            for replacement
+            in proposed_files
+        ],
+        *reviewer_result.files_reviewed,
+    ]
+
+    repository_context = (
+        build_repository_context(
+            project.files,
+            query_text=(
+                project.issue
+                + "\n"
+                + original_analysis.summary
+                + "\n"
+                + reviewer_result.summary
+                + "\n"
+                + "\n".join(
+                    finding.description
+                    for finding
+                    in reviewer_result.findings
+                )
+            ),
+            preferred_paths=preferred_paths,
+        )
     )
 
     available_workers = (
@@ -314,8 +344,8 @@ needed. Do not expand scope merely to satisfy a reviewer comment.
 === INDEPENDENT REVIEWER FEEDBACK ===
 {reviewer_result.model_dump_json(indent=2)}
 
-=== ORIGINAL REPOSITORY FILES ===
-{repository_files}
+=== REPOSITORY CONTEXT ===
+{repository_context}
 """.strip()
 
 
@@ -378,9 +408,29 @@ def build_test_failure_revision_input(
     proposed_files: list[FileReplacement],
     test_result: RepositoryTestResult,
 ) -> str:
-    repository_files = "\n\n".join(
-        f"--- FILE: {path} ---\n{content}"
-        for path, content in project.files.items()
+    preferred_paths = [
+        *current_analysis.likely_files,
+        *[
+            replacement.file_path
+            for replacement
+            in proposed_files
+        ],
+    ]
+
+    repository_context = (
+        build_repository_context(
+            project.files,
+            query_text=(
+                project.issue
+                + "\n"
+                + current_analysis.summary
+                + "\n"
+                + test_result.stdout
+                + "\n"
+                + test_result.stderr
+            ),
+            preferred_paths=preferred_paths,
+        )
     )
 
     available_workers = (
@@ -452,8 +502,8 @@ specific test is incorrect or no longer relevant.
 === ACTUAL DOCKER TEST RESULT ===
 {test_result.model_dump_json(indent=2)}
 
-=== ORIGINAL REPOSITORY FILES ===
-{repository_files}
+=== REPOSITORY CONTEXT ===
+{repository_context}
 """.strip()
 
 

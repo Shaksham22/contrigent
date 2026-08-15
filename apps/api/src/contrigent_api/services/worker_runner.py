@@ -1,5 +1,8 @@
 import importlib
 from pathlib import PurePosixPath
+from contrigent_api.services.repository_context_builder import (
+    build_repository_context,
+)
 
 from agents import Runner
 
@@ -218,10 +221,41 @@ def build_worker_input(
         worker_id
     )
 
-    repository_files = "\n\n".join(
-        f"--- FILE: {path} ---\n{content}"
-        for path, content
-        in sample_project.files.items()
+    dependency_file_paths = [
+        replacement.file_path
+        for result
+        in shared_worker_results.values()
+        for replacement
+        in result.files_to_replace
+    ]
+
+    preferred_paths = [
+        *issue_analysis.likely_files,
+        *dependency_file_paths,
+    ]
+
+    query_parts = [
+        sample_project.issue,
+        assigned_task,
+        issue_analysis.summary,
+    ]
+
+    if candidate_test_result is not None:
+        query_parts.extend(
+            [
+                candidate_test_result.stdout,
+                candidate_test_result.stderr,
+            ]
+        )
+
+    repository_context = (
+        build_repository_context(
+            sample_project.files,
+            query_text="\n".join(
+                query_parts
+            ),
+            preferred_paths=preferred_paths,
+        )
     )
 
     capabilities = ", ".join(
@@ -280,8 +314,8 @@ Capabilities: {capabilities or "None listed"}
 === APPROVED MANAGER ANALYSIS AND PLAN ===
 {issue_analysis.model_dump_json(indent=2)}
 
-=== REPOSITORY FILES ===
-{repository_files}
+=== REPOSITORY CONTEXT ===
+{repository_context}
 """.strip()
 
 

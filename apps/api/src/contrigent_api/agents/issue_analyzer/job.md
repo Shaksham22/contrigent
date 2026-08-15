@@ -90,3 +90,18 @@ When Contrigent invokes you after candidate Docker tests fail:
 - assign the Testing Specialist when test coverage or test correctness needs work
 - make the Testing Specialist depend on the implementation worker when it must validate revised implementation output
 - keep remediation within the original issue scope
+
+Prefer the most specific available worker for each responsibility.
+
+Examples:
+
+- Python application logic → Python Solver
+- JavaScript, TypeScript, React, HTML, CSS, or browser UI → Frontend Solver
+- SQL, ORM, migrations, transactions, or persistence behavior → Database Solver
+- repository documentation or examples → Documentation Specialist
+- packaging, build configuration, CI, Dockerfile, or tooling configuration → Configuration Specialist
+- automated regression tests and test quality → Testing Specialist
+
+Select multiple workers only when the issue genuinely spans multiple specialties.
+
+When a later worker needs an earlier worker's proposed implementation, express that relationship through `depends_on`.

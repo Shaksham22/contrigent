@@ -1,4 +1,7 @@
 from agents import Runner
+from contrigent_api.services.repository_context_builder import (
+    build_repository_context,
+)
 
 from contrigent_api.agents.independent_reviewer.agent import (
     agent as independent_reviewer,
@@ -66,10 +69,71 @@ def build_reviewer_input(
         RepositoryTestResult | None
     ) = None,
 ) -> str:
-    repository_files = "\n\n".join(
-        f"--- ORIGINAL FILE: {path} ---\n{content}"
-        for path, content
-        in sample_project.files.items()
+    worker_file_paths = [
+        replacement.file_path
+        for result
+        in worker_results.values()
+        for replacement
+        in result.files_to_replace
+    ]
+
+    proposed_file_paths = [
+        replacement.file_path
+        for replacement
+        in proposed_files
+    ]
+
+    previous_reviewed_files = (
+        previous_reviewer_result.files_reviewed
+        if previous_reviewer_result
+        is not None
+        else []
+    )
+
+    preferred_paths = [
+        *issue_analysis.likely_files,
+        *worker_file_paths,
+        *proposed_file_paths,
+        *previous_reviewed_files,
+    ]
+
+    query_parts = [
+        sample_project.issue,
+        issue_analysis.summary,
+        *[
+            replacement.reason
+            for replacement
+            in proposed_files
+        ],
+    ]
+
+    if previous_reviewer_result is not None:
+        query_parts.append(
+            previous_reviewer_result.summary
+        )
+
+        query_parts.extend(
+            finding.description
+            for finding
+            in previous_reviewer_result.findings
+        )
+
+    if candidate_test_result is not None:
+        query_parts.extend(
+            [
+                candidate_test_result.stdout,
+                candidate_test_result.stderr,
+            ]
+        )
+
+    repository_context = (
+        build_repository_context(
+            sample_project.files,
+            query_text="\n".join(
+                query_parts
+            ),
+            preferred_paths=preferred_paths,
+        )
     )
 
     worker_results_text = "\n\n".join(
@@ -121,8 +185,8 @@ def build_reviewer_input(
 === APPROVED MANAGER ANALYSIS AND PLAN ===
 {issue_analysis.model_dump_json(indent=2)}
 
-=== ORIGINAL REPOSITORY FILES ===
-{repository_files}
+=== ORIGINAL REPOSITORY CONTEXT ===
+{repository_context}
 
 === WORKER RESULTS ===
 {worker_results_text}

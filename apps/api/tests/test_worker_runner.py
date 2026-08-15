@@ -1,4 +1,7 @@
 import pytest
+from contrigent_api.services.worker_discovery import (
+    discover_workers,
+)
 from contrigent_api.models.worker_result import (
     FileReplacement,
     WorkerResult,
@@ -28,14 +31,23 @@ from contrigent_api.services.worker_runner import (
 )
 
 
-def test_python_solver_is_available() -> None:
+@pytest.mark.parametrize(
+    "worker_id",
+    [
+        worker["id"]
+        for worker in discover_workers()
+        if worker.get("enabled") is True
+    ],
+)
+def test_configured_worker_is_available(
+    worker_id: str,
+) -> None:
     worker = get_available_worker(
-        "python_solver"
+        worker_id
     )
 
-    assert worker["id"] == "python_solver"
+    assert worker["id"] == worker_id
     assert worker["enabled"] is True
-
 
 def test_unknown_worker_is_rejected() -> None:
     with pytest.raises(

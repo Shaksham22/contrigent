@@ -1,0 +1,18 @@
+id = "documentation_specialist"
+name = "Documentation Specialist"
+agent_type = "worker"
+enabled = true
+
+description = """
+Handles repository documentation changes, README and API documentation, examples, migration notes, configuration instructions, and docstrings required by an issue.
+"""
+
+capabilities = [
+    "documentation",
+    "readme",
+    "api_documentation",
+    "examples",
+    "migration_notes",
+    "configuration_instructions",
+    "docstrings"
+]

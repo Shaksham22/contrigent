@@ -8,8 +8,12 @@ dependencies = [
     "fastapi",
     "openai-agents>=0.19.4",
     "pydantic",
+    "python-dotenv",
     "uvicorn[standard]",
 ]
+
+[project.scripts]
+contrigent = "contrigent_api.cli.main:main"
 
 [dependency-groups]
 dev = [
@@ -28,3 +32,4 @@ packages = ["src/contrigent_api"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+

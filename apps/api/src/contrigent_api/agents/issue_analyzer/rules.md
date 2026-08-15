@@ -24,3 +24,7 @@
 - `needs_clarification` means Contrigent cannot identify sufficiently supported implementation work from the supplied evidence.
 - When a solution cannot be identified, explain the blocker in `summary` and `ambiguities`, return no worker assignments, and return no implementation steps.
 - Never invent work simply because Contrigent is capable of running workers.
+- Prefer a specialized worker over a more general worker when its capabilities directly match the assigned task.
+- Do not invoke specialists merely because they are available.
+- Documentation work should depend on implementation work when the documentation must describe that implementation.
+- Testing work should depend on the implementation workers whose proposed changes it must validate.
