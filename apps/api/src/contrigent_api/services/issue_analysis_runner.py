@@ -27,6 +27,9 @@ from contrigent_api.services.worker_discovery import (
     discover_workers,
 )
 
+from contrigent_api.services.issue_image_input_builder import (
+    build_input_with_issue_images,
+)
 
 def build_available_workers_section(
     workers: list[dict],
@@ -186,10 +189,12 @@ async def analyze_project(
 
     result = await Runner.run(
         issue_analyzer,
-        agent_input,
+        build_input_with_issue_images(
+            agent_input,
+            project,
+        ),
         max_turns=3,
     )
-
     if not isinstance(
         result.final_output,
         IssueAnalysis,
@@ -338,7 +343,10 @@ async def replan_after_review(
 
     result = await Runner.run(
         issue_analyzer,
-        agent_input,
+        build_input_with_issue_images(
+            agent_input,
+            project,
+        ),
         max_turns=3,
     )
 
@@ -471,7 +479,10 @@ async def replan_after_test_failure(
 
     result = await Runner.run(
         issue_analyzer,
-        agent_input,
+        build_input_with_issue_images(
+            agent_input,
+            project,
+        ),
         max_turns=3,
     )
 

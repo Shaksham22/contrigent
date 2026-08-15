@@ -21,6 +21,9 @@ from contrigent_api.models.repository_test_result import (
     RepositoryTestResult,
 )
 
+from contrigent_api.services.issue_image_input_builder import (
+    build_input_with_issue_images,
+)
 def build_proposed_files_section(
     proposed_files,
 ) -> str:
@@ -159,7 +162,10 @@ async def run_reviewer(
     )
     result = await Runner.run(
         independent_reviewer,
-        reviewer_input,
+        build_input_with_issue_images(
+            reviewer_input,
+            sample_project,
+        ),
         max_turns=3,
     )
 

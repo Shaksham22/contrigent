@@ -9,7 +9,9 @@ from contrigent_api.services.github_project_downloader import (
     GitHubProjectDownloadError,
     build_downloaded_project_name,
     build_issue_markdown,
+    collect_issue_image_references,
     download_github_project,
+    extract_github_issue_image_urls,
     parse_github_issue_url,
     parse_github_repository_url,
 )
@@ -91,6 +93,73 @@ def test_builds_issue_markdown_with_comments() -> None:
     assert "Something is broken." in markdown
     assert "comment-author" in markdown
     assert "I can reproduce this." in markdown
+
+def test_extracts_github_images_from_markdown_and_html() -> None:
+    image_urls = (
+        extract_github_issue_image_urls(
+            """
+![failure](https://github.com/user-attachments/assets/abc123)
+<img src="https://user-images.githubusercontent.com/1/example.png">
+![external](https://example.com/not-github.png)
+"""
+        )
+    )
+
+    assert image_urls == [
+        (
+            "https://github.com/"
+            "user-attachments/assets/abc123"
+        ),
+        (
+            "https://user-images."
+            "githubusercontent.com/"
+            "1/example.png"
+        ),
+    ]
+
+
+def test_collects_images_from_issue_and_comments() -> None:
+    references = (
+        collect_issue_image_references(
+            issue={
+                "body": (
+                    "![issue]("
+                    "https://github.com/"
+                    "user-attachments/assets/"
+                    "issue-image)"
+                )
+            },
+            comments=[
+                {
+                    "body": (
+                        "![comment]("
+                        "https://github.com/"
+                        "user-attachments/assets/"
+                        "comment-image)"
+                    )
+                }
+            ],
+        )
+    )
+
+    assert references == [
+        (
+            "issue-description",
+            (
+                "https://github.com/"
+                "user-attachments/assets/"
+                "issue-image"
+            ),
+        ),
+        (
+            "comment-1",
+            (
+                "https://github.com/"
+                "user-attachments/assets/"
+                "comment-image"
+            ),
+        ),
+    ]
 
 
 def test_download_cleans_up_after_failure(

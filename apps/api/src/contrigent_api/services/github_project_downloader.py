@@ -17,9 +17,38 @@ DOWNLOADED_GITHUB_PROJECTS_FOLDER = (
     PROJECT_ROOT
     / "downloaded_github_projects"
 )
-
 FORK_READY_TIMEOUT_SECONDS = 120
 FORK_READY_CHECK_INTERVAL_SECONDS = 2
+
+ISSUE_IMAGES_FOLDER_NAME = "github_issue_images"
+
+MAX_ISSUE_IMAGE_BYTES = (
+    10 * 1024 * 1024
+)
+
+GITHUB_ISSUE_IMAGE_HOSTS = {
+    "github.com",
+    "user-images.githubusercontent.com",
+    "private-user-images.githubusercontent.com",
+    "raw.githubusercontent.com",
+}
+
+IMAGE_EXTENSION_BY_CONTENT_TYPE = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+}
+
+MARKDOWN_IMAGE_PATTERN = re.compile(
+    r"!\[[^\]]*\]\(\s*(https://[^)\s]+)",
+    re.IGNORECASE,
+)
+
+HTML_IMAGE_PATTERN = re.compile(
+    r"<img\b[^>]*\bsrc=[\"'](https://[^\"']+)[\"']",
+    re.IGNORECASE,
+)
 
 class GitHubProjectDownloadError(RuntimeError):
     pass
@@ -319,6 +348,258 @@ def get_authenticated_github_user() -> str:
 
     return login
 
+def is_github_issue_image_url(
+    image_url: str,
+) -> bool:
+    parsed_url = urlparse(
+        image_url
+    )
+
+    if parsed_url.scheme != "https":
+        return False
+
+    host = parsed_url.netloc.lower()
+
+    if host not in GITHUB_ISSUE_IMAGE_HOSTS:
+        return False
+
+    if (
+        host == "github.com"
+        and not parsed_url.path.startswith(
+            "/user-attachments/"
+        )
+    ):
+        return False
+
+    return True
+
+
+def extract_github_issue_image_urls(
+    markdown: str,
+) -> list[str]:
+    image_urls: list[str] = []
+    seen_urls: set[str] = set()
+
+    candidates = (
+        MARKDOWN_IMAGE_PATTERN.findall(
+            markdown
+        )
+        + HTML_IMAGE_PATTERN.findall(
+            markdown
+        )
+    )
+
+    for image_url in candidates:
+        clean_url = image_url.strip()
+
+        if (
+            clean_url in seen_urls
+            or not is_github_issue_image_url(
+                clean_url
+            )
+        ):
+            continue
+
+        seen_urls.add(
+            clean_url
+        )
+
+        image_urls.append(
+            clean_url
+        )
+
+    return image_urls
+
+
+def collect_issue_image_references(
+    issue: dict,
+    comments: list[dict],
+) -> list[tuple[str, str]]:
+    sections = [
+        (
+            "issue-description",
+            issue.get("body") or "",
+        )
+    ]
+
+    sections.extend(
+        (
+            f"comment-{index}",
+            comment.get("body") or "",
+        )
+        for index, comment in enumerate(
+            comments,
+            start=1,
+        )
+    )
+
+    references: list[
+        tuple[str, str]
+    ] = []
+
+    seen_urls: set[str] = set()
+
+    for source_name, markdown in sections:
+        for image_url in (
+            extract_github_issue_image_urls(
+                markdown
+            )
+        ):
+            if image_url in seen_urls:
+                continue
+
+            seen_urls.add(
+                image_url
+            )
+
+            references.append(
+                (
+                    source_name,
+                    image_url,
+                )
+            )
+
+    return references
+
+
+def fetch_github_issue_image(
+    image_url: str,
+) -> tuple[bytes, str]:
+    headers = {
+        "User-Agent": "Contrigent",
+    }
+
+    github_token = os.getenv(
+        "GITHUB_TOKEN"
+    )
+
+    if github_token:
+        headers["Authorization"] = (
+            f"Bearer {github_token}"
+        )
+
+    request = Request(
+        image_url,
+        headers=headers,
+        method="GET",
+    )
+
+    try:
+        with urlopen(
+            request,
+            timeout=30,
+        ) as response:
+            content_type = (
+                response.headers
+                .get_content_type()
+                .lower()
+            )
+
+            if (
+                content_type
+                not in
+                IMAGE_EXTENSION_BY_CONTENT_TYPE
+            ):
+                raise GitHubProjectDownloadError(
+                    "Unsupported GitHub issue "
+                    "image type: "
+                    f"{content_type}"
+                )
+
+            image_bytes = response.read(
+                MAX_ISSUE_IMAGE_BYTES + 1
+            )
+
+    except HTTPError as error:
+        raise GitHubProjectDownloadError(
+            "GitHub issue image returned "
+            f"HTTP {error.code}: "
+            f"{image_url}"
+        ) from error
+
+    except URLError as error:
+        raise GitHubProjectDownloadError(
+            "Could not download GitHub "
+            "issue image: "
+            f"{error.reason}"
+        ) from error
+
+    if (
+        len(image_bytes)
+        > MAX_ISSUE_IMAGE_BYTES
+    ):
+        raise GitHubProjectDownloadError(
+            "GitHub issue image exceeds "
+            "the 10 MB limit."
+        )
+
+    return (
+        image_bytes,
+        content_type,
+    )
+
+
+def download_issue_images(
+    issue: dict,
+    comments: list[dict],
+    images_folder: Path,
+) -> list[Path]:
+    references = (
+        collect_issue_image_references(
+            issue,
+            comments,
+        )
+    )
+
+    if not references:
+        return []
+
+    images_folder.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    saved_images: list[Path] = []
+
+    for index, (
+        source_name,
+        image_url,
+    ) in enumerate(
+        references,
+        start=1,
+    ):
+        (
+            image_bytes,
+            content_type,
+        ) = fetch_github_issue_image(
+            image_url
+        )
+
+        extension = (
+            IMAGE_EXTENSION_BY_CONTENT_TYPE[
+                content_type
+            ]
+        )
+
+        image_path = (
+            images_folder
+            / (
+                f"{index:03d}-"
+                f"{source_name}"
+                f"{extension}"
+            )
+        )
+
+        image_path.write_bytes(
+            image_bytes
+        )
+
+        saved_images.append(
+            image_path
+        )
+
+    return saved_images
+
 def fetch_all_issue_comments(
     owner: str,
     repository: str,
@@ -502,6 +783,11 @@ def download_github_project(
         / "repository"
     )
 
+    issue_images_folder = (
+        project_folder
+        / ISSUE_IMAGES_FOLDER_NAME
+    )
+
     api_issue_url = (
         "https://api.github.com/repos/"
         f"{issue_location.owner}/"
@@ -540,6 +826,12 @@ def download_github_project(
                 comments,
             ),
             encoding="utf-8",
+        )
+
+        download_issue_images(
+            issue,
+            comments,
+            issue_images_folder,
         )
 
         fork_repository_url = (

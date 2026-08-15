@@ -19,3 +19,4 @@ class ProjectContext:
     contributing: str
 
     files: dict[str, str]
+    issue_images: tuple[Path, ...] = ()

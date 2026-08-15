@@ -17,8 +17,12 @@ from contrigent_api.models.project_context import (
 from contrigent_api.models.repository_test_result import (
     RepositoryTestResult,
 )
+
 from contrigent_api.services.worker_discovery import (
     discover_workers,
+)
+from contrigent_api.services.issue_image_input_builder import (
+    build_input_with_issue_images,
 )
 
 
@@ -149,6 +153,7 @@ def build_project_with_proposed_files(
         readme=sample_project.readme,
         contributing=sample_project.contributing,
         files=candidate_files,
+        issue_images=sample_project.issue_images,
     )
 
 
@@ -305,7 +310,10 @@ async def run_worker(
 
     result = await Runner.run(
         worker_agent,
-        worker_input,
+        build_input_with_issue_images(
+            worker_input,
+            sample_project,
+        ),
         max_turns=3,
     )
 

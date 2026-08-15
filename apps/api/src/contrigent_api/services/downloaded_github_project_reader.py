@@ -6,6 +6,7 @@ from contrigent_api.models.project_context import (
 )
 from contrigent_api.services.github_project_downloader import (
     DOWNLOADED_GITHUB_PROJECTS_FOLDER,
+    ISSUE_IMAGES_FOLDER_NAME,
 )
 from contrigent_api.services.repository_file_reader import (
     read_repository_text_files,
@@ -89,6 +90,24 @@ def load_downloaded_github_project(
         repository_folder
     )
 
+    issue_images_folder = (
+        project_folder
+        / ISSUE_IMAGES_FOLDER_NAME
+    )
+
+    issue_images = (
+        tuple(
+            sorted(
+                path
+                for path
+                in issue_images_folder.iterdir()
+                if path.is_file()
+            )
+        )
+        if issue_images_folder.is_dir()
+        else ()
+    )
+
     return ProjectContext(
         project_name=project_name,
         project_source=ProjectSource.GITHUB,
@@ -97,4 +116,5 @@ def load_downloaded_github_project(
         readme=readme,
         contributing=contributing,
         files=files,
+        issue_images=issue_images,
     )
