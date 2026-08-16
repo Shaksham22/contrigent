@@ -40,9 +40,10 @@ def isolated_agent_files(
 
     model_config_file.write_text(
         (
-            '[agents]\n'
-            'issue_analyzer = '
-            '{ model = "gpt-test" }\n'
+            '[issue_analyzer]\n'
+            'models = [\n'
+            '    { model = "gpt-test" },\n'
+            ']\n'
         ),
         encoding="utf-8",
     )
@@ -119,13 +120,13 @@ def test_creates_standard_worker_files_and_model_entry(
 
     assert (
         model_config[
-            "agents"
-        ][
             "backend_solver"
+        ]["models"]
+        == [
+            {
+                "model": "gpt-worker-test",
+            }
         ]
-        == {
-            "model": "gpt-worker-test"
-        }
     )
 
 
@@ -184,9 +185,10 @@ def test_model_config_duplicate_is_rejected(
 
     model_config_file.write_text(
         (
-            '[agents]\n'
-            'issue_analyzer = { model = "gpt-test" }\n'
-            'Backend_Solver = { model = "gpt-test" }\n'
+            '[issue_analyzer]\n'
+            'models = [{ model = "gpt-test" }]\n\n'
+            '[Backend_Solver]\n'
+            'models = [{ model = "gpt-test" }]\n'
         ),
         encoding="utf-8",
     )

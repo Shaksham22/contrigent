@@ -20,7 +20,7 @@ MODEL_CONFIG_FILE = (
 
 def load_agent_models() -> dict[
     str,
-    AgentModelConfig,
+    tuple[AgentModelConfig, ...],
 ]:
     return load_agent_model_configs(
         MODEL_CONFIG_FILE
@@ -71,7 +71,7 @@ def discover_workers() -> list[dict]:
             False,
         )
 
-        model_config = (
+        model_ladder = (
             agent_models.get(
                 worker_id
             )
@@ -79,7 +79,7 @@ def discover_workers() -> list[dict]:
 
         if (
             enabled
-            and model_config is None
+            and model_ladder is None
         ):
             raise ValueError(
                 f"Enabled worker has no model configured: {worker_id}"
@@ -102,8 +102,8 @@ def discover_workers() -> list[dict]:
                 ),
                 "enabled": enabled,
                 "model": (
-                    model_config.model
-                    if model_config
+                    model_ladder[0].model
+                    if model_ladder
                     is not None
                     else None
                 ),

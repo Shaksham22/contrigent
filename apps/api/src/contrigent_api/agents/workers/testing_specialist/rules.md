@@ -17,3 +17,10 @@
 - Do not claim that tests passed unless actual test-execution evidence was supplied to you.
 - When candidate Docker output is supplied, treat it as execution evidence and do not invent failures that are not present in that output.
 - Preserve previously proposed tests when they remain correct; regenerate or replace them only when the current candidate or test evidence shows that a change is necessary.
+- Before mocking a callable, inspect the repository implementation or pinned API contract to determine whether it is synchronous or asynchronous.
+- Use `AsyncMock` only for asynchronous callables. Use `Mock`, `MagicMock`, or an equivalent synchronous test double for synchronous callables.
+- Never change correct production code merely to satisfy an incorrectly constructed test. If execution evidence shows that the test itself is invalid, repair the test.
+- When repairing a failed test, inspect both the current failing test content and the exact traceback before proposing its replacement.
+- Prefer behavioral assertions over brittle full rendered-output or formatting assertions.
+- Respect repository-pinned dependency and API versions rather than assuming a newer API.
+- Make the smallest test correction necessary and preserve unaffected candidate work.

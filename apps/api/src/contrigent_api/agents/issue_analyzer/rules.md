@@ -7,9 +7,18 @@
 - Do not publish anything.
 - Do not claim that tests were executed.
 - Do not claim that you inspected files that were not supplied.
+- Use `context_request_paths` and `context_search_terms` only for targeted repository evidence that is likely to resolve the current analysis blocker.
+- When requesting repository context, return no worker assignments and no implementation steps.
+- Prefer an exact path visible in the repository tree over a search term.
+- Never request the whole repository or use broad meaningless search terms such as `bug`, `code`, or `tests`.
+- A final analysis must leave both context-request lists empty.
 - Do not invent ambiguities simply to fill an output field.
 - Keep implementation plans focused on the reported issue.
 - Only select worker IDs supplied in AVAILABLE WORKERS.
+- Every worker assignment must list the exact repository-relative files that worker may replace.
+- Assign each file to exactly one worker within a worker execution cycle.
+- Use `depends_on` to share earlier results; dependencies do not transfer file ownership.
+- A new remediation cycle may reassign a file when the evidence supports a different owner.
 - Never invent a worker agent.
 - Do not select disabled or unavailable workers.
 - An empty worker_assignments list is valid when no available worker is appropriate.

@@ -1,6 +1,11 @@
 from agents import Runner
 
+from contrigent_api.services.agent_model_config import (
+    configure_agent_for_run_invocation,
+)
+
 from contrigent_api.agents.pull_request_documentation_agent.agent import (
+    AGENT_ID as PULL_REQUEST_DOCUMENTATION_AGENT_ID,
     agent as pull_request_documentation_agent,
 )
 from contrigent_api.agents.pull_request_documentation_agent.output_schema import (
@@ -207,8 +212,15 @@ def run_pull_request_documentation(
         )
     )
 
+    configured_agent = (
+        configure_agent_for_run_invocation(
+            PULL_REQUEST_DOCUMENTATION_AGENT_ID,
+            pull_request_documentation_agent,
+            run.id,
+        )
+    )
     result = Runner.run_sync(
-        pull_request_documentation_agent,
+        configured_agent,
         documentation_input,
         max_turns=3,
     )

@@ -1,13 +1,60 @@
-[agents]
-#issue_analyzer = { model = "gpt-5.6-sol", reasoning_effort = "high" }
-issue_analyzer = { model = "gpt-5.4-mini"}
-code_editor = { model = "gpt-5.4-mini" }
-python_solver = { model = "gpt-5.4-mini" }
-testing_specialist = { model = "gpt-5.4-mini" }
-independent_reviewer = { model = "gpt-5.4-mini" }
-pull_request_documentation_agent = { model = "gpt-5.4-mini" }
-frontend_solver = { model = "gpt-5.4-mini" }
-documentation_specialist = { model = "gpt-5.4-mini" }
-database_solver = { model = "gpt-5.4-mini" }
-configuration_specialist = { model = "gpt-5.4-mini" }
-advanced_solver = { model = "gpt-5.6-sol", reasoning_effort = "high" }
+[issue_analyzer]
+models = [
+    { model = "gpt-5.4-mini" },
+]
+
+[code_editor]
+models = [
+    { model = "gpt-5.4-mini" },
+]
+
+[python_solver]
+models = [
+    { model = "gpt-5.4-mini" },
+]
+
+[testing_specialist]
+models = [
+    { model = "gpt-5.4-mini" },
+    { model = "gpt-5.6-sol", reasoning_effort = "high" },
+]
+
+[independent_reviewer]
+models = [
+    { model = "gpt-5.4-mini" },
+]
+
+[pull_request_documentation_agent]
+models = [
+    { model = "gpt-5.4-mini" },
+]
+
+[frontend_solver]
+models = [
+    { model = "gpt-5.4-mini" },
+]
+
+[documentation_specialist]
+models = [
+    { model = "gpt-5.4-mini" },
+]
+
+[database_solver]
+models = [
+    { model = "gpt-5.4-mini" },
+]
+
+[configuration_specialist]
+models = [
+    { model = "gpt-5.4-mini" },
+]
+
+[advanced_solver]
+models = [
+    { model = "gpt-5.6-sol", reasoning_effort = "high" },
+]
+
+[repository_setup_specialist]
+models = [
+    { model = "gpt-5.4-mini" },
+]

@@ -4,9 +4,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 import tomllib
+from uuid import UUID
 
-from agents import ModelSettings
+from agents import Agent, ModelSettings
 from openai.types.shared import Reasoning
+
+from contrigent_api.services.run_memory_store import (
+    get_agent_invocation_count,
+    record_agent_invocation,
+)
 
 
 MODEL_CONFIG_FILE = (
@@ -23,6 +29,11 @@ ALLOWED_REASONING_EFFORTS = {
     "max",
 }
 
+MODEL_ENTRY_KEYS = {
+    "model",
+    "reasoning_effort",
+}
+
 
 @dataclass(frozen=True)
 class AgentModelConfig:
@@ -30,141 +41,229 @@ class AgentModelConfig:
     reasoning_effort: str | None = None
 
 
+AgentModelLadder = tuple[
+    AgentModelConfig,
+    ...,
+]
+
+
 def load_agent_model_configs(
     config_file: Path = MODEL_CONFIG_FILE,
-) -> dict[str, AgentModelConfig]:
+) -> dict[str, AgentModelLadder]:
     with config_file.open("rb") as file:
         config = tomllib.load(file)
 
-    agents = config.get(
-        "agents"
-    )
-
-    if not isinstance(
-        agents,
-        dict,
-    ):
-        raise ValueError(
-            "agent_models.toml is missing "
-            "the [agents] section."
-        )
-
-    model_configs: dict[
+    model_ladders: dict[
         str,
-        AgentModelConfig,
+        AgentModelLadder,
     ] = {}
 
-    for agent_id, entry in agents.items():
-        if not isinstance(
-            entry,
-            dict,
-        ):
-            raise ValueError(
-                (
-                    f"Agent '{agent_id}' model "
-                    "configuration must be an "
-                    "inline table."
-                )
-            )
-
-        model = entry.get(
-            "model"
-        )
-
+    for agent_id, section in config.items():
         if (
-            not isinstance(model, str)
-            or not model.strip()
+            not isinstance(agent_id, str)
+            or not agent_id.strip()
+            or not isinstance(section, dict)
         ):
             raise ValueError(
-                (
-                    f"Agent '{agent_id}' must "
-                    "configure a model."
+                "Each agent model configuration must "
+                "be a named TOML section."
+            )
+
+        unexpected_section_keys = (
+            set(section) - {"models"}
+        )
+
+        if unexpected_section_keys:
+            raise ValueError(
+                f"Agent '{agent_id}' has unsupported "
+                "configuration fields: "
+                + ", ".join(
+                    sorted(unexpected_section_keys)
                 )
             )
 
-        reasoning_effort = entry.get(
-            "reasoning_effort"
-        )
+        models = section.get("models")
 
-        if reasoning_effort is not None:
-            if (
-                not isinstance(
-                    reasoning_effort,
-                    str,
-                )
-                or reasoning_effort
-                not in ALLOWED_REASONING_EFFORTS
-            ):
+        if not isinstance(models, list):
+            raise ValueError(
+                f"Agent '{agent_id}' must contain "
+                "a models list."
+            )
+
+        if not models:
+            raise ValueError(
+                f"Agent '{agent_id}' must configure "
+                "at least one model."
+            )
+
+        parsed_models: list[
+            AgentModelConfig
+        ] = []
+
+        for index, entry in enumerate(
+            models,
+            start=1,
+        ):
+            if not isinstance(entry, dict):
                 raise ValueError(
-                    (
-                        f"Agent '{agent_id}' has "
-                        "an invalid "
-                        "reasoning_effort."
+                    f"Agent '{agent_id}' model entry "
+                    f"{index} must be an inline table."
+                )
+
+            unexpected_entry_keys = (
+                set(entry) - MODEL_ENTRY_KEYS
+            )
+
+            if unexpected_entry_keys:
+                raise ValueError(
+                    f"Agent '{agent_id}' model entry "
+                    f"{index} has unsupported fields: "
+                    + ", ".join(
+                        sorted(unexpected_entry_keys)
                     )
                 )
 
-        model_configs[
-            agent_id
-        ] = AgentModelConfig(
-            model=model.strip(),
-            reasoning_effort=(
-                reasoning_effort
-            ),
+            model = entry.get("model")
+
+            if (
+                not isinstance(model, str)
+                or not model.strip()
+            ):
+                raise ValueError(
+                    f"Agent '{agent_id}' model entry "
+                    f"{index} must configure a model."
+                )
+
+            reasoning_effort = entry.get(
+                "reasoning_effort"
+            )
+
+            if reasoning_effort is not None:
+                if (
+                    not isinstance(
+                        reasoning_effort,
+                        str,
+                    )
+                    or reasoning_effort
+                    not in ALLOWED_REASONING_EFFORTS
+                ):
+                    raise ValueError(
+                        f"Agent '{agent_id}' model entry "
+                        f"{index} has an invalid "
+                        "reasoning_effort."
+                    )
+
+            parsed_models.append(
+                AgentModelConfig(
+                    model=model.strip(),
+                    reasoning_effort=(
+                        reasoning_effort
+                    ),
+                )
+            )
+
+        model_ladders[agent_id] = tuple(
+            parsed_models
         )
 
-    return model_configs
+    return model_ladders
+
+
+def get_agent_model_config(
+    agent_id: str,
+    invocation_number: int,
+    config_file: Path = MODEL_CONFIG_FILE,
+) -> AgentModelConfig:
+    if invocation_number < 1:
+        raise ValueError(
+            "Agent invocation number must be at least 1."
+        )
+
+    ladders = load_agent_model_configs(
+        config_file
+    )
+
+    try:
+        ladder = ladders[agent_id]
+    except KeyError as error:
+        raise ValueError(
+            "No model configuration exists for "
+            f"agent '{agent_id}'."
+        ) from error
+
+    index = min(
+        invocation_number - 1,
+        len(ladder) - 1,
+    )
+
+    return ladder[index]
 
 
 def load_agent_model_config(
     agent_id: str,
     config_file: Path = MODEL_CONFIG_FILE,
 ) -> AgentModelConfig:
-    configs = load_agent_model_configs(
-        config_file
+    return get_agent_model_config(
+        agent_id,
+        1,
+        config_file,
     )
-
-    try:
-        return configs[
-            agent_id
-        ]
-    except KeyError as error:
-        raise ValueError(
-            (
-                "No model configuration "
-                f"exists for agent "
-                f"'{agent_id}'."
-            )
-        ) from error
 
 
 def build_agent_model_arguments(
     agent_id: str,
     config_file: Path = MODEL_CONFIG_FILE,
+    *,
+    invocation_number: int = 1,
 ) -> dict[str, Any]:
-    config = load_agent_model_config(
+    config = get_agent_model_config(
         agent_id,
+        invocation_number,
         config_file,
     )
 
-    arguments: dict[
-        str,
-        Any,
-    ] = {
-        "model": config.model,
-    }
+    model_settings = ModelSettings()
 
-    if (
-        config.reasoning_effort
-        is not None
-    ):
-        arguments[
-            "model_settings"
-        ] = ModelSettings(
+    if config.reasoning_effort is not None:
+        model_settings = ModelSettings(
             reasoning=Reasoning(
-                effort=(
-                    config.reasoning_effort
-                ),
+                effort=config.reasoning_effort,
             ),
         )
 
-    return arguments
+    return {
+        "model": config.model,
+        "model_settings": model_settings,
+    }
+
+
+def configure_agent_for_run_invocation(
+    agent_id: str,
+    agent: Agent[Any],
+    run_id: UUID,
+) -> Agent[Any]:
+    invocation_number = (
+        get_agent_invocation_count(
+            run_id,
+            agent_id,
+        )
+        + 1
+    )
+    arguments = build_agent_model_arguments(
+        agent_id,
+        invocation_number=invocation_number,
+    )
+    configured_agent = agent.clone(
+        **arguments
+    )
+    recorded_invocation = record_agent_invocation(
+        run_id,
+        agent_id,
+    )
+
+    if recorded_invocation != invocation_number:
+        raise RuntimeError(
+            "Agent invocation count changed unexpectedly."
+        )
+
+    return configured_agent

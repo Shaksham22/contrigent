@@ -1,6 +1,13 @@
 from agents import Runner
+from pathlib import PurePosixPath
+from uuid import UUID
+
+from contrigent_api.services.agent_model_config import (
+    configure_agent_for_run_invocation,
+)
 
 from contrigent_api.services.repository_context_builder import (
+    MAX_REPOSITORY_CONTEXT_CHARS,
     build_repository_context,
 )
 
@@ -8,12 +15,14 @@ from contrigent_api.agents.independent_reviewer.output_schema import (
     ReviewerResult,
 )
 from contrigent_api.agents.issue_analyzer.agent import (
+    AGENT_ID as ISSUE_ANALYZER_AGENT_ID,
     issue_analyzer,
 )
 from contrigent_api.agents.issue_analyzer.output_schema import (
     Feasibility,
     IssueAnalysis,
     WorkerAssignment,
+    validate_worker_assignment_file_ownership,
 )
 from contrigent_api.models.project_context import (
     ProjectContext,
@@ -35,6 +44,384 @@ from contrigent_api.services.worker_discovery import (
 from contrigent_api.services.issue_image_input_builder import (
     build_input_with_issue_images,
 )
+
+
+MAX_CONTEXT_EXPANSION_ROUNDS = 2
+MAX_REQUESTED_PATHS_PER_ROUND = 10
+MAX_SEARCH_TERMS_PER_ROUND = 10
+MAX_SEARCH_MATCHES_PER_TERM = 5
+MAX_CONTEXT_SEARCH_TERM_LENGTH = 100
+MAX_ADDITIONAL_CONTEXT_CHARS = (
+    MAX_REPOSITORY_CONTEXT_CHARS
+)
+
+
+def normalize_context_request_path(
+    file_path: str,
+) -> str:
+    clean_path = file_path.strip()
+
+    if not clean_path:
+        raise ValueError(
+            "Repository context request paths cannot be blank."
+        )
+
+    path = PurePosixPath(clean_path)
+
+    if (
+        path.is_absolute()
+        or ".." in path.parts
+        or path.as_posix() == "."
+    ):
+        raise ValueError(
+            "Repository context request paths must be safe "
+            f"repository-relative paths: {file_path}"
+        )
+
+    return path.as_posix()
+
+
+def normalize_context_search_terms(
+    search_terms: list[str],
+) -> tuple[list[str], list[str]]:
+    normalized_terms: list[str] = []
+    unavailable: list[str] = []
+    seen_terms: set[str] = set()
+
+    for raw_term in search_terms:
+        term = raw_term.strip()
+
+        if not term:
+            unavailable.append(
+                "Blank repository search term was rejected."
+            )
+            continue
+
+        normalized_key = term.casefold()
+
+        if normalized_key in seen_terms:
+            continue
+
+        seen_terms.add(normalized_key)
+
+        if len(term) > MAX_CONTEXT_SEARCH_TERM_LENGTH:
+            unavailable.append(
+                "Repository search term exceeds the "
+                f"{MAX_CONTEXT_SEARCH_TERM_LENGTH}-character "
+                f"limit: {term!r}."
+            )
+            continue
+
+        if (
+            len(normalized_terms)
+            >= MAX_SEARCH_TERMS_PER_ROUND
+        ):
+            unavailable.append(
+                "Repository search term was not used because "
+                "the per-round limit was reached: "
+                f"{term!r}."
+            )
+            continue
+
+        normalized_terms.append(term)
+
+    return normalized_terms, unavailable
+
+
+def search_repository_files(
+    project_files: dict[str, str],
+    search_terms: list[str],
+    *,
+    excluded_paths: set[str] | None = None,
+) -> tuple[list[str], list[str]]:
+    excluded = excluded_paths or set()
+    matched_paths: list[str] = []
+    seen_paths = set(excluded)
+    unavailable: list[str] = []
+
+    for term in search_terms:
+        normalized_term = term.casefold()
+        candidates: list[
+            tuple[str, bool, int]
+        ] = []
+
+        for file_path, content in project_files.items():
+            path_match = (
+                normalized_term
+                in file_path.casefold()
+            )
+            content_matches = (
+                content.casefold().count(
+                    normalized_term
+                )
+            )
+
+            if path_match or content_matches:
+                candidates.append(
+                    (
+                        file_path,
+                        path_match,
+                        content_matches,
+                    )
+                )
+
+        candidates.sort(
+            key=lambda candidate: (
+                -int(candidate[1]),
+                -candidate[2],
+                len(candidate[0]),
+                candidate[0],
+            )
+        )
+
+        term_matches = 0
+
+        for file_path, _, _ in candidates:
+            if file_path in seen_paths:
+                continue
+
+            matched_paths.append(file_path)
+            seen_paths.add(file_path)
+            term_matches += 1
+
+            if (
+                term_matches
+                >= MAX_SEARCH_MATCHES_PER_TERM
+            ):
+                break
+
+        if term_matches == 0:
+            unavailable.append(
+                "Repository search produced no new file "
+                f"matches for: {term!r}."
+            )
+
+    return matched_paths, unavailable
+
+
+def _additional_context_section(
+    file_path: str,
+    content: str,
+) -> str:
+    return (
+        f"--- FILE: {file_path} ---\n"
+        f"{content}"
+    )
+
+
+def resolve_repository_context_requests(
+    project_files: dict[str, str],
+    analysis: IssueAnalysis,
+    accumulated_paths: list[str],
+) -> tuple[list[str], list[str]]:
+    resolved_paths: list[str] = []
+    unavailable: list[str] = []
+    seen_requested_paths: set[str] = set()
+
+    for raw_path in analysis.context_request_paths:
+        try:
+            file_path = normalize_context_request_path(
+                raw_path
+            )
+        except ValueError as error:
+            unavailable.append(str(error))
+            continue
+
+        if file_path in seen_requested_paths:
+            continue
+
+        seen_requested_paths.add(file_path)
+
+        if (
+            len(seen_requested_paths)
+            > MAX_REQUESTED_PATHS_PER_ROUND
+        ):
+            unavailable.append(
+                "Repository path was not used because the "
+                "per-round request limit was reached: "
+                f"{file_path!r}."
+            )
+            continue
+
+        if file_path not in project_files:
+            unavailable.append(
+                "Requested repository path is not present "
+                f"in project.files: {file_path!r}."
+            )
+            continue
+
+        if file_path not in accumulated_paths:
+            resolved_paths.append(file_path)
+
+    search_terms, term_errors = (
+        normalize_context_search_terms(
+            analysis.context_search_terms
+        )
+    )
+    unavailable.extend(term_errors)
+
+    search_paths, search_errors = (
+        search_repository_files(
+            project_files,
+            search_terms,
+            excluded_paths={
+                *accumulated_paths,
+                *resolved_paths,
+            },
+        )
+    )
+    unavailable.extend(search_errors)
+    resolved_paths.extend(search_paths)
+
+    used_chars = sum(
+        len(
+            _additional_context_section(
+                file_path,
+                project_files[file_path],
+            )
+        )
+        for file_path in accumulated_paths
+    )
+    bounded_paths: list[str] = []
+
+    for file_path in resolved_paths:
+        section_size = len(
+            _additional_context_section(
+                file_path,
+                project_files[file_path],
+            )
+        )
+
+        if (
+            used_chars + section_size
+            > MAX_ADDITIONAL_CONTEXT_CHARS
+        ):
+            unavailable.append(
+                "Requested repository file was not supplied "
+                "because the accumulated additional-context "
+                f"budget was reached: {file_path!r}."
+            )
+            continue
+
+        bounded_paths.append(file_path)
+        used_chars += section_size
+
+    return bounded_paths, unavailable
+
+
+def build_expanded_analysis_input(
+    initial_input: str,
+    project: ProjectContext,
+    previous_analysis: IssueAnalysis,
+    accumulated_paths: list[str],
+    unavailable_requests: list[str],
+) -> str:
+    if accumulated_paths:
+        additional_context = "\n\n".join(
+            _additional_context_section(
+                file_path,
+                project.files[file_path],
+            )
+            for file_path in accumulated_paths
+        )
+    else:
+        additional_context = (
+            "No additional repository files were resolved."
+        )
+
+    if unavailable_requests:
+        unavailable_text = "\n".join(
+            f"- {message}"
+            for message in unavailable_requests
+        )
+    else:
+        unavailable_text = "None."
+
+    return f"""
+=== ORIGINAL BOUNDED MANAGER INPUT ===
+{initial_input}
+
+=== PREVIOUS MANAGER ANALYSIS ===
+{previous_analysis.model_dump_json(indent=2)}
+
+=== ADDITIONAL REQUESTED REPOSITORY CONTEXT ===
+{additional_context}
+
+=== UNSATISFIED REPOSITORY CONTEXT REQUESTS ===
+{unavailable_text}
+
+This additional context was supplied because your previous analysis requested it.
+Re-evaluate the issue using both the original context and this additional repository
+evidence. Return another targeted context request only if specific additional
+repository evidence is still necessary. Otherwise return the final analysis with
+empty context-request lists.
+""".strip()
+
+
+def finalize_unresolved_context_request(
+    analysis: IssueAnalysis,
+    reason: str,
+    unavailable_requests: list[str],
+) -> IssueAnalysis:
+    details = [reason, *unavailable_requests]
+    detail_text = " ".join(details)
+
+    return analysis.model_copy(
+        update={
+            "summary": (
+                "Solution not found: Contrigent could not "
+                "obtain sufficient repository evidence "
+                "within bounded context expansion. "
+                f"{detail_text}"
+            ),
+            "ambiguities": [
+                *analysis.ambiguities,
+                *details,
+            ],
+            "feasibility": Feasibility.NEEDS_CLARIFICATION,
+            "context_request_paths": [],
+            "context_search_terms": [],
+            "worker_assignments": [],
+            "implementation_plan": [],
+        }
+    )
+
+
+async def _invoke_issue_analyzer(
+    agent_input: str,
+    project: ProjectContext,
+    run_id: UUID,
+):
+    runner_input = build_input_with_issue_images(
+        agent_input,
+        project,
+    )
+    configured_agent = (
+        configure_agent_for_run_invocation(
+            ISSUE_ANALYZER_AGENT_ID,
+            issue_analyzer,
+            run_id,
+        )
+    )
+    result = await Runner.run(
+        configured_agent,
+        runner_input,
+        max_turns=3,
+    )
+
+    if not isinstance(
+        result.final_output,
+        IssueAnalysis,
+    ):
+        raise TypeError(
+            "Issue Analyzer returned an "
+            "unexpected output type."
+        )
+
+    return (
+        result.final_output,
+        result.context_wrapper.usage,
+    )
 
 def build_available_workers_section(
     workers: list[dict],
@@ -150,6 +537,10 @@ def validate_worker_assignments(
             "must be unique."
         )
 
+    validate_worker_assignment_file_ownership(
+        worker_assignments
+    )
+
     assignments_by_worker_id = {
         assignment.worker_id: assignment
         for assignment in worker_assignments
@@ -185,39 +576,90 @@ def validate_worker_assignments(
 
 async def analyze_project(
     project: ProjectContext,
+    *,
+    run_id: UUID,
 ):
     workers = discover_workers()
 
-    agent_input = build_analysis_input(
+    initial_input = build_analysis_input(
         project,
         workers,
     )
 
-    result = await Runner.run(
-        issue_analyzer,
-        build_input_with_issue_images(
-            agent_input,
-            project,
-        ),
-        max_turns=3,
+    analysis, usage = await _invoke_issue_analyzer(
+        initial_input,
+        project,
+        run_id,
     )
-    if not isinstance(
-        result.final_output,
-        IssueAnalysis,
+    expansion_rounds = 0
+    accumulated_paths: list[str] = []
+    unavailable_requests: list[str] = []
+
+    while (
+        analysis.context_request_paths
+        or analysis.context_search_terms
     ):
-        raise TypeError(
-            "Issue Analyzer returned an "
-            "unexpected output type."
+        if (
+            expansion_rounds
+            >= MAX_CONTEXT_EXPANSION_ROUNDS
+        ):
+            analysis = finalize_unresolved_context_request(
+                analysis,
+                (
+                    "The maximum of "
+                    f"{MAX_CONTEXT_EXPANSION_ROUNDS} "
+                    "repository context expansion rounds "
+                    "was exhausted."
+                ),
+                unavailable_requests,
+            )
+            break
+
+        new_paths, resolution_errors = (
+            resolve_repository_context_requests(
+                project.files,
+                analysis,
+                accumulated_paths,
+            )
+        )
+        unavailable_requests.extend(
+            resolution_errors
+        )
+
+        if not new_paths:
+            analysis = finalize_unresolved_context_request(
+                analysis,
+                (
+                    "The latest context request resolved "
+                    "to zero new usable repository files."
+                ),
+                unavailable_requests,
+            )
+            break
+
+        accumulated_paths.extend(new_paths)
+        expansion_rounds += 1
+        expanded_input = build_expanded_analysis_input(
+            initial_input,
+            project,
+            analysis,
+            accumulated_paths,
+            unavailable_requests,
+        )
+        analysis, usage = await _invoke_issue_analyzer(
+            expanded_input,
+            project,
+            run_id,
         )
 
     validate_worker_assignments(
-        result.final_output.worker_assignments,
+        analysis.worker_assignments,
         workers,
     )
 
     return (
-        result.final_output,
-        result.context_wrapper.usage,
+        analysis,
+        usage,
     )
 
 
@@ -359,6 +801,8 @@ async def replan_after_review(
     candidate_test_result: (
         RepositoryTestResult | None
     ) = None,
+    *,
+    run_id: UUID,
 ):
     workers = discover_workers()
 
@@ -372,12 +816,20 @@ async def replan_after_review(
         candidate_test_result,
     )
 
+    runner_input = build_input_with_issue_images(
+        agent_input,
+        project,
+    )
+    configured_agent = (
+        configure_agent_for_run_invocation(
+            ISSUE_ANALYZER_AGENT_ID,
+            issue_analyzer,
+            run_id,
+        )
+    )
     result = await Runner.run(
-        issue_analyzer,
-        build_input_with_issue_images(
-            agent_input,
-            project,
-        ),
+        configured_agent,
+        runner_input,
         max_turns=3,
     )
 
@@ -707,6 +1159,8 @@ async def replan_after_test_failure(
     worker_results: dict[str, WorkerResult],
     proposed_files: list[FileReplacement],
     test_result: RepositoryTestResult,
+    *,
+    run_id: UUID,
 ):
     workers = discover_workers()
 
@@ -721,12 +1175,20 @@ async def replan_after_test_failure(
         )
     )
 
+    runner_input = build_input_with_issue_images(
+        agent_input,
+        project,
+    )
+    configured_agent = (
+        configure_agent_for_run_invocation(
+            ISSUE_ANALYZER_AGENT_ID,
+            issue_analyzer,
+            run_id,
+        )
+    )
     result = await Runner.run(
-        issue_analyzer,
-        build_input_with_issue_images(
-            agent_input,
-            project,
-        ),
+        configured_agent,
+        runner_input,
         max_turns=3,
     )
 
@@ -782,13 +1244,23 @@ async def replan_after_test_failure(
         )
     )
 
+    reconsideration_runner_input = (
+        build_input_with_issue_images(
+            reconsideration_input,
+            project,
+        )
+    )
+    reconsideration_agent = (
+        configure_agent_for_run_invocation(
+            ISSUE_ANALYZER_AGENT_ID,
+            issue_analyzer,
+            run_id,
+        )
+    )
     reconsideration_result = (
         await Runner.run(
-            issue_analyzer,
-            build_input_with_issue_images(
-                reconsideration_input,
-                project,
-            ),
+            reconsideration_agent,
+            reconsideration_runner_input,
             max_turns=3,
         )
     )
@@ -822,11 +1294,14 @@ async def replan_after_test_failure(
 
 async def analyze_sample_project(
     project_name: str,
+    *,
+    run_id: UUID,
 ):
     project = load_sample_project(
         project_name
     )
 
     return await analyze_project(
-        project
+        project,
+        run_id=run_id,
     )

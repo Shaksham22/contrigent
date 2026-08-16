@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from contrigent_api.agents.issue_analyzer.output_schema import (
@@ -23,6 +26,11 @@ from contrigent_api.models.project_context import (
     ProjectSource,
 )
 
+if TYPE_CHECKING:
+    from contrigent_api.services.repository_environment_verifier import (
+        VerifiedRepositoryTestRecipe,
+    )
+
 class RunNotFoundError(Exception):
     """Raised when a requested run does not exist."""
 
@@ -32,6 +40,14 @@ class InvalidRunTransitionError(Exception):
 
 
 _runs: dict[UUID, Run] = {}
+_verified_repository_test_recipes: dict[
+    UUID,
+    VerifiedRepositoryTestRecipe,
+] = {}
+_agent_invocation_counts: dict[
+    UUID,
+    dict[str, int],
+] = {}
 
 
 def create_run(
@@ -64,6 +80,94 @@ def get_run(run_id: UUID) -> Run:
         raise RunNotFoundError(str(run_id))
 
     return run
+
+
+def get_agent_invocation_count(
+    run_id: UUID,
+    agent_id: str,
+) -> int:
+    get_run(run_id)
+
+    return _agent_invocation_counts.get(
+        run_id,
+        {},
+    ).get(
+        agent_id,
+        0,
+    )
+
+
+def record_agent_invocation(
+    run_id: UUID,
+    agent_id: str,
+) -> int:
+    get_run(run_id)
+    clean_agent_id = agent_id.strip()
+
+    if not clean_agent_id:
+        raise ValueError(
+            "Agent ID cannot be blank."
+        )
+
+    run_counts = (
+        _agent_invocation_counts.setdefault(
+            run_id,
+            {},
+        )
+    )
+    invocation_number = (
+        run_counts.get(clean_agent_id, 0)
+        + 1
+    )
+    run_counts[clean_agent_id] = (
+        invocation_number
+    )
+
+    return invocation_number
+
+
+def store_verified_repository_test_recipe(
+    run_id: UUID,
+    recipe: VerifiedRepositoryTestRecipe,
+) -> None:
+    run = get_run(run_id)
+
+    if run.status != RunStatus.ANALYZING:
+        raise InvalidRunTransitionError(
+            "Repository preflight must finish before analysis."
+        )
+
+    if not recipe.setup_verified:
+        raise InvalidRunTransitionError(
+            "Cannot store an unverified repository test recipe."
+        )
+
+    if (
+        recipe.baseline_result.stage != "tests"
+        or not recipe.baseline_result.passed
+    ):
+        raise InvalidRunTransitionError(
+            "Cannot store a recipe without a passing baseline."
+        )
+
+    _verified_repository_test_recipes[
+        run_id
+    ] = recipe
+
+
+def get_verified_repository_test_recipe(
+    run_id: UUID,
+) -> VerifiedRepositoryTestRecipe:
+    get_run(run_id)
+
+    try:
+        return _verified_repository_test_recipes[
+            run_id
+        ]
+    except KeyError as error:
+        raise InvalidRunTransitionError(
+            "Run has no verified repository test recipe."
+        ) from error
 
 
 def attach_analysis(
@@ -141,6 +245,8 @@ def approve_plan(run_id: UUID) -> Run:
 def clear_runs() -> None:
     """Clear the in-memory store. Used by automated tests."""
     _runs.clear()
+    _verified_repository_test_recipes.clear()
+    _agent_invocation_counts.clear()
 
 
 

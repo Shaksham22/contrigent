@@ -264,6 +264,13 @@ def show_run_progress(
         return
 
     symbols = {
+        "preflight_started": "→",
+        "preflight_detecting": "→",
+        "preflight_verifying": "→",
+        "preflight_discovery": "→",
+        "preflight_passed": "✓",
+        "preflight_failed": "✗",
+        "analysis_started": "→",
         "worker_started": "→",
         "worker_completed": "✓",
         "testing_started": "→",

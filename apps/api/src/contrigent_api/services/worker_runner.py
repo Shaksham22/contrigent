@@ -1,5 +1,10 @@
 import importlib
 from pathlib import PurePosixPath
+from uuid import UUID
+
+from contrigent_api.services.agent_model_config import (
+    configure_agent_for_run_invocation,
+)
 from contrigent_api.services.repository_context_builder import (
     build_repository_context,
 )
@@ -11,6 +16,7 @@ from agents import Runner
 
 from contrigent_api.agents.issue_analyzer.output_schema import (
     IssueAnalysis,
+    validate_worker_assignment_file_ownership,
 )
 from contrigent_api.models.worker_result import (
     FileReplacement,
@@ -151,6 +157,37 @@ def remove_unchanged_replacements(
         findings=worker_result.findings,
         files_to_replace=changed_files,
     )
+
+
+def validate_worker_result_file_ownership(
+    worker_id: str,
+    assigned_files: list[str],
+    worker_result: WorkerResult,
+) -> None:
+    safe_assigned_files = {
+        validate_replacement_path(file_path)
+        for file_path in assigned_files
+    }
+
+    for replacement in worker_result.files_to_replace:
+        safe_path = validate_replacement_path(
+            replacement.file_path
+        )
+
+        if safe_path not in safe_assigned_files:
+            assigned_files_text = (
+                ", ".join(
+                    sorted(safe_assigned_files)
+                )
+                or "none"
+            )
+            raise ValueError(
+                f"Worker '{worker_id}' returned unassigned "
+                f"file '{safe_path}'. Assigned files: "
+                f"{assigned_files_text}."
+            )
+
+
 def build_project_with_proposed_files(
     sample_project: ProjectContext,
     proposed_files: list[FileReplacement],
@@ -230,6 +267,7 @@ def merge_proposed_files(
 def build_worker_input(
     worker_id: str,
     assigned_task: str,
+    assigned_files: list[str],
     shared_worker_results: dict[str, WorkerResult],
     sample_project: ProjectContext,
     issue_analysis: IssueAnalysis,
@@ -250,6 +288,7 @@ def build_worker_input(
     ]
 
     preferred_paths = [
+        *assigned_files,
         *issue_analysis.likely_files,
         *dependency_file_paths,
     ]
@@ -280,6 +319,11 @@ def build_worker_input(
 
     capabilities = ", ".join(
         worker.get("capabilities", [])
+    )
+
+    assigned_files_text = "\n".join(
+        f"- {file_path}"
+        for file_path in assigned_files
     )
 
     if shared_worker_results:
@@ -316,6 +360,15 @@ Capabilities: {capabilities or "None listed"}
 === YOUR ASSIGNED TASK ===
 {assigned_task}
 
+=== ASSIGNED FILE OWNERSHIP ===
+Assigned files:
+{assigned_files_text}
+
+You may inspect other supplied repository files for context, but you may only return
+replacements for the assigned files listed above. Dependency results provide context
+and do not transfer file ownership. If another file should change, report that need in
+your findings instead of editing the file.
+
 === RESULTS SHARED BY MANAGER ===
 {shared_results}
 
@@ -342,12 +395,15 @@ Capabilities: {capabilities or "None listed"}
 async def run_worker(
     worker_id: str,
     assigned_task: str,
+    assigned_files: list[str],
     shared_worker_results: dict[str, WorkerResult],
     sample_project: ProjectContext,
     issue_analysis: IssueAnalysis,
     candidate_test_result: (
         RepositoryTestResult | None
     ) = None,
+    *,
+    run_id: UUID,
 ) -> WorkerResult:
     worker_agent = load_worker_agent(
         worker_id
@@ -356,18 +412,27 @@ async def run_worker(
     worker_input = build_worker_input(
         worker_id,
         assigned_task,
+        assigned_files,
         shared_worker_results,
         sample_project,
         issue_analysis,
         candidate_test_result,
     )
 
+    runner_input = build_input_with_issue_images(
+        worker_input,
+        sample_project,
+    )
+    configured_agent = (
+        configure_agent_for_run_invocation(
+            worker_id,
+            worker_agent,
+            run_id,
+        )
+    )
     result = await Runner.run(
-        worker_agent,
-        build_input_with_issue_images(
-            worker_input,
-            sample_project,
-        ),
+        configured_agent,
+        runner_input,
         max_turns=3,
     )
 
@@ -378,6 +443,12 @@ async def run_worker(
         raise TypeError(
             f"Worker returned an unexpected output type: {worker_id}"
         )
+
+    validate_worker_result_file_ownership(
+        worker_id,
+        assigned_files,
+        result.final_output,
+    )
 
     return remove_unchanged_replacements(
         result.final_output,
@@ -393,6 +464,8 @@ async def run_assigned_workers(
     progress_callback: (
         RunProgressCallback | None
     ) = None,
+    *,
+    run_id: UUID,
 ) -> tuple[
     dict[str, WorkerResult],
     list[FileReplacement],
@@ -406,6 +479,10 @@ async def run_assigned_workers(
     assignments = sorted(
         issue_analysis.worker_assignments,
         key=lambda assignment: assignment.order,
+    )
+
+    validate_worker_assignment_file_ownership(
+        assignments
     )
 
     for assignment in assignments:
@@ -450,10 +527,18 @@ async def run_assigned_workers(
         worker_result = await run_worker(
             assignment.worker_id,
             assignment.task,
+            assignment.files,
             shared_worker_results,
             sample_project,
             issue_analysis,
             candidate_test_result,
+            run_id=run_id,
+        )
+
+        validate_worker_result_file_ownership(
+            assignment.worker_id,
+            assignment.files,
+            worker_result,
         )
 
         worker_results[

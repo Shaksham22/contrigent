@@ -17,9 +17,11 @@ def isolated_worker_files(
     )
 
     model_config_file.write_text(
-    """[agents]
-backend_solver = { model = "gpt-backend-test" }
-frontend_solver = { model = "gpt-frontend-test" }
+    """[backend_solver]
+models = [{ model = "gpt-backend-test" }]
+
+[frontend_solver]
+models = [{ model = "gpt-frontend-test" }]
 """,
         encoding="utf-8",
     )

@@ -9,6 +9,7 @@ from contrigent_api.services import (
 )
 from contrigent_api.services.repository_test_runner import (
     RepositoryTestRunnerError,
+    RepositoryTestStrategy,
     run_repository_tests,
 )
 
@@ -1388,4 +1389,122 @@ def test_candidate_files_are_overlaid_before_dependency_setup(
 
     assert workspace_mount.endswith(
         ",readonly"
+    )
+
+
+def test_explicit_strategy_execution_does_not_redetect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = create_uv_test_repository(
+        tmp_path
+    )
+    strategy = RepositoryTestStrategy(
+        python_version="3.12",
+        dependency_setup_commands=(
+            "uv sync --group test",
+        ),
+        test_command=(
+            "/test-environment/workspace/.venv/"
+            "bin/python -m pytest -q"
+        ),
+        evidence=("verified recipe",),
+    )
+    commands: list[list[str]] = []
+
+    def fail_if_redetected(*_args, **_kwargs):
+        raise AssertionError(
+            "Stored strategies must not be rediscovered."
+        )
+
+    def fake_run(
+        command: list[str],
+        **_kwargs,
+    ) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=(
+                "Dependencies ready."
+                if len(commands) == 1
+                else "10 passed"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        repository_test_runner,
+        "build_repository_test_strategy",
+        fail_if_redetected,
+    )
+    monkeypatch.setattr(
+        repository_test_runner.subprocess,
+        "run",
+        fake_run,
+    )
+
+    result = (
+        repository_test_runner
+        .execute_repository_test_strategy(
+            repository,
+            strategy,
+        )
+    )
+
+    assert result.passed is True
+    assert "uv sync --group test" in commands[0][-1]
+    assert strategy.test_command in commands[1][-1]
+
+
+def test_repository_setup_mutations_are_detected(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    pyproject_path = repository / "pyproject.toml"
+    pyproject_path.write_text(
+        "[project]\nname = 'example'\n",
+        encoding="utf-8",
+    )
+    before = repository_test_runner.snapshot_repository_files(
+        repository
+    )
+
+    pyproject_path.write_text(
+        "[project]\nname = 'changed'\n",
+        encoding="utf-8",
+    )
+    (repository / "uv.lock").write_text(
+        "version = 1\n",
+        encoding="utf-8",
+    )
+
+    assert (
+        repository_test_runner.find_repository_setup_mutations(
+            before,
+            repository,
+        )
+        == ["pyproject.toml", "uv.lock"]
+    )
+
+
+@pytest.mark.parametrize(
+    "file_name",
+    [
+        "uv.lock",
+        "poetry.lock",
+        "package-lock.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "requirements-dev.txt",
+    ],
+)
+def test_generated_dependency_files_are_protected(
+    file_name: str,
+) -> None:
+    assert (
+        repository_test_runner
+        .is_protected_new_repository_file(file_name)
+        is True
     )

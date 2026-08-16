@@ -233,7 +233,10 @@ def main() -> None:
                     max_review_rounds=(
                         max_review_rounds
                     ),
-                )
+                ),
+                progress_callback=(
+                    show_run_progress
+                ),
             )
         )
 

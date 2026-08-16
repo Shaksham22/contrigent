@@ -13,7 +13,11 @@ from contrigent_api.services.pull_request_documentation_runner import (
 )
 
 from contrigent_api.services.repository_test_runner import (
-    run_repository_tests,
+    execute_repository_test_strategy,
+)
+from contrigent_api.services.repository_environment_verifier import (
+    verify_repository_environment,
+    verify_repository_revision,
 )
 
 from contrigent_api.services.approved_file_applier import (
@@ -61,10 +65,6 @@ from contrigent_api.agents.issue_analyzer.output_schema import (
 from contrigent_api.services.issue_analysis_runner import (
     analyze_project,
     replan_after_review,
-)
-from contrigent_api.services.issue_analysis_runner import (
-    analyze_project,
-    replan_after_review,
     replan_after_test_failure,
 )
 
@@ -93,11 +93,10 @@ from contrigent_api.services.run_memory_store import (
     complete_applying_changes,
     start_repository_tests,
     complete_repository_tests,
-    start_worker_work,
     start_test_revision_worker_work,
-    start_revision_worker_work,
     record_candidate_test_result,
-    complete_review,
+    get_verified_repository_test_recipe,
+    store_verified_repository_test_recipe,
 )
 
 from contrigent_api.services.worker_runner import (
@@ -109,6 +108,8 @@ from contrigent_api.services.worker_runner import (
 from contrigent_api.services.reviewer_runner import (
     run_reviewer,
 )
+
+
 def candidate_file_contents(
     proposed_files: list[FileReplacement],
 ) -> dict[str, str]:
@@ -146,6 +147,9 @@ class CreateRunRequest(BaseModel):
 @router.post("", response_model=Run)
 async def start_run(
     request: CreateRunRequest,
+    progress_callback: (
+        RunProgressCallback | None
+    ) = None,
 ) -> Run:
     using_project = (
         request.project_name is not None
@@ -224,9 +228,9 @@ async def start_run(
 
     try:
         if (
-        project.project_source
-        == ProjectSource.GITHUB
-    ):
+            project.project_source
+            == ProjectSource.GITHUB
+        ):
             repository_path = (
                 project.repository_path
             )
@@ -247,9 +251,30 @@ async def start_run(
             run.run_branch = (
                 run_branch
             )
+
+            verified_recipe = (
+                await verify_repository_environment(
+                    project,
+                    progress_callback=(
+                        progress_callback
+                    ),
+                    run_id=run.id,
+                )
+            )
+            store_verified_repository_test_recipe(
+                run.id,
+                verified_recipe,
+            )
+
+        report_run_progress(
+            progress_callback,
+            "analysis_started",
+            "Starting issue analysis",
+        )
         analysis, _usage = (
             await analyze_project(
-                project
+                project,
+                run_id=run.id,
             )
         )
 
@@ -324,6 +349,22 @@ async def run_approved_plan(
                 "Cannot run workers without an analysis."
             )
 
+        verified_recipe = None
+
+        if (
+            project.project_source
+            == ProjectSource.GITHUB
+        ):
+            verified_recipe = (
+                get_verified_repository_test_recipe(
+                    run_id
+                )
+            )
+            verify_repository_revision(
+                project.repository_path,
+                verified_recipe,
+            )
+
         worker_results, proposed_files = (
             await run_assigned_workers(
                 project,
@@ -331,6 +372,7 @@ async def run_approved_plan(
                 progress_callback=(
                     progress_callback
                 ),
+                run_id=run.id,
             )
         )
 
@@ -380,16 +422,26 @@ async def run_approved_plan(
                             ),
                         )
 
+                    if verified_recipe is None:
+                        raise InvalidRunTransitionError(
+                            "Candidate testing requires a "
+                            "verified repository test recipe."
+                        )
+
+                    verify_repository_revision(
+                        project.repository_path,
+                        verified_recipe,
+                    )
                     candidate_test_result = (
-                        run_repository_tests(
+                        execute_repository_test_strategy(
                             project.repository_path,
+                            verified_recipe.strategy,
                             progress_callback=(
                                 candidate_test_progress
                             ),
                             proposed_files=(
                                 run.proposed_files
                             ),
-                            issue_text=project.issue,
                         )
                     )
 
@@ -532,6 +584,7 @@ async def run_approved_plan(
                             current_worker_results,
                             current_proposed_files,
                             candidate_test_result,
+                            run_id=run.id,
                         )
                     )
 
@@ -638,6 +691,7 @@ async def run_approved_plan(
                         progress_callback=(
                             progress_callback
                         ),
+                        run_id=run.id,
                     )
 
                     final_proposed_files = (
@@ -718,6 +772,7 @@ async def run_approved_plan(
                     candidate_test_result=(
                         run.candidate_test_result
                     ),
+                    run_id=run.id,
                 )
             )
 
@@ -835,6 +890,7 @@ async def run_approved_plan(
                 current_proposed_files,
                 reviewer_result,
                 run.candidate_test_result,
+                run_id=run.id,
             )
             revised_assignment_details = tuple(
                 (
@@ -889,6 +945,7 @@ async def run_approved_plan(
                 progress_callback=(
                     progress_callback
                 ),
+                run_id=run.id,
             )
 
             final_proposed_files = (
@@ -1033,6 +1090,16 @@ def approve_run_final_changes(
             run_branch,
         )
 
+        verified_recipe = (
+            get_verified_repository_test_recipe(
+                run.id
+            )
+        )
+        verify_repository_revision(
+            repository_path,
+            verified_recipe,
+        )
+
         original_branch = (
             run.original_branch
         )
@@ -1080,9 +1147,10 @@ def approve_run_final_changes(
         run = start_repository_tests(
             run.id
         )
-        test_result = run_repository_tests(
+        test_result = execute_repository_test_strategy(
             repository_path,
-            issue_text=project.issue,
+            verified_recipe.strategy,
+            protect_repository_files=True,
         )
 
         run = complete_repository_tests(

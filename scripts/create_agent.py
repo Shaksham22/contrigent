@@ -107,13 +107,11 @@ def model_entry_already_exists(
     with MODEL_CONFIG_FILE.open("rb") as file:
         config = tomllib.load(file)
 
-    agents = config.get("agents", {})
-
     target = agent_id.casefold()
 
     return any(
         existing_id.casefold() == target
-        for existing_id in agents
+        for existing_id in config
     )
 
 
@@ -128,31 +126,7 @@ def add_agent_to_model_config(
         encoding="utf-8"
     )
 
-    if "[agents]" not in text:
-        raise ValueError(
-            "agent_models.toml is missing the [agents] section."
-        )
-
-    lines = text.splitlines()
-
-    agents_section_index = lines.index(
-        "[agents]"
-    )
-
-    insert_index = len(lines)
-
-    for index in range(
-        agents_section_index + 1,
-        len(lines),
-    ):
-        if lines[index].strip().startswith("["):
-            insert_index = index
-            break
-
-    model_entry = (
-        f'{agent_id} = '
-        f'{{ model = "{model}"'
-    )
+    model_entry = f'    {{ model = "{model}"'
 
     if reasoning_effort is not None:
         model_entry += (
@@ -160,14 +134,22 @@ def add_agent_to_model_config(
             f'"{reasoning_effort}"'
         )
 
-    model_entry += " }"
+    model_entry += " },"
 
-    lines.insert(
-        insert_index,
-        model_entry,
+    section = "\n".join(
+        [
+            f"[{agent_id}]",
+            "models = [",
+            model_entry,
+            "]",
+        ]
     )
-
-    updated_text = "\n".join(lines) + "\n"
+    updated_text = (
+        text.rstrip()
+        + "\n\n"
+        + section
+        + "\n"
+    )
 
     temporary_config_file = (
         MODEL_CONFIG_FILE.with_suffix(
@@ -441,7 +423,7 @@ def main() -> None:
 
     parser.add_argument(
         "--model",
-        default="gpt-5.4-mini",
+        required=True,
         help="Model assigned to this agent.",
     )
 

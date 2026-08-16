@@ -1,8 +1,15 @@
 from agents import Runner
+from uuid import UUID
 
-from contrigent_api.agents.code_editor.agent import code_editor
+from contrigent_api.agents.code_editor.agent import (
+    AGENT_ID as CODE_EDITOR_AGENT_ID,
+    code_editor,
+)
 from contrigent_api.agents.code_editor.output_schema import CodeEditResult
 from contrigent_api.agents.issue_analyzer.output_schema import IssueAnalysis
+from contrigent_api.services.agent_model_config import (
+    configure_agent_for_run_invocation,
+)
 from contrigent_api.services.sample_project_reader import SampleProjectContext
 
 
@@ -36,14 +43,23 @@ def build_code_editor_input(
 async def edit_sample_project(
     sample_project: SampleProjectContext,
     issue_analysis: IssueAnalysis,
+    *,
+    run_id: UUID,
 ) -> CodeEditResult:
     agent_input = build_code_editor_input(
         sample_project,
         issue_analysis,
     )
 
+    configured_agent = (
+        configure_agent_for_run_invocation(
+            CODE_EDITOR_AGENT_ID,
+            code_editor,
+            run_id,
+        )
+    )
     result = await Runner.run(
-        code_editor,
+        configured_agent,
         agent_input,
         max_turns=3,
     )

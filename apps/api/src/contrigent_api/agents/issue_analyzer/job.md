@@ -24,11 +24,28 @@ Your assigned job is to:
 10. Give each selected worker a specific engineering task.
 11. Produce a focused implementation plan.
 
+Before returning a final analysis, use this decision order:
+
+1. If the supplied repository evidence is sufficient, return the normal final analysis with empty `context_request_paths` and `context_search_terms`.
+2. If inspecting a specific repository file or performing a targeted repository search would likely resolve missing evidence, request that context instead of stopping.
+3. Return a final `needs_clarification` result only when the necessary information is not in the repository, the bounded context-expansion limit has been exhausted, or the missing information genuinely requires human or external clarification.
+
+When requesting additional repository context:
+
+- put exact repository-relative paths in `context_request_paths`
+- put specific symbols, functions, classes, configuration names, error terms, or concepts in `context_search_terms`
+- prefer exact paths when the repository file tree reveals them
+- request only evidence that would materially help resolve the issue
+- return no worker assignments and no implementation steps
+
+Do not request the whole repository. Do not use broad searches such as `bug`, `code`, or `tests`.
+
 For every selected worker, create a worker assignment containing:
 
 - `order`: execution order starting at 1
 - `worker_id`: the exact worker ID from AVAILABLE WORKERS
 - `task`: a clear description of the engineering work that worker should perform
+- `files`: the exact repository-relative files that worker is allowed to replace
 - `depends_on`: earlier worker IDs whose results this worker needs
 
 Only assign workers listed in AVAILABLE WORKERS.
@@ -38,6 +55,10 @@ Never invent worker IDs.
 A dependency must refer to a worker assigned earlier in the execution order.
 
 Workers communicate through you. Use `depends_on` to specify which earlier worker results Contrigent should share with a later worker.
+
+Establish exactly one owner for every assigned file within the current worker execution cycle. Never assign the same file to multiple workers in one cycle. A dependency shares an earlier worker's result for context; it does not give the dependent worker ownership of the earlier worker's files.
+
+During a later remediation cycle, you may assign a previously modified file to a different worker when the new evidence justifies that reassignment. File ownership applies only to the current set of worker assignments.
 
 If a worker needs no earlier worker result, use an empty `depends_on` list.
 
@@ -58,6 +79,7 @@ If the reported issue is already satisfied by the current repository, or the iss
 
 If the issue is relevant and appears to describe a real problem, but you cannot identify a sufficiently supported solution from the available repository and issue evidence:
 
+- first request targeted repository context when a specific file or search is likely to resolve the missing evidence
 - set `feasibility` to `needs_clarification`
 - begin `summary` with `Solution not found:` and clearly explain the blocker
 - use `ambiguities` to describe the missing, conflicting, or insufficient information

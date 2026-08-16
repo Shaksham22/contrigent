@@ -1,9 +1,15 @@
 from agents import Runner
+from uuid import UUID
+
+from contrigent_api.services.agent_model_config import (
+    configure_agent_for_run_invocation,
+)
 from contrigent_api.services.repository_context_builder import (
     build_repository_context,
 )
 
 from contrigent_api.agents.independent_reviewer.agent import (
+    AGENT_ID as INDEPENDENT_REVIEWER_AGENT_ID,
     agent as independent_reviewer,
 )
 from contrigent_api.agents.independent_reviewer.output_schema import (
@@ -27,6 +33,11 @@ from contrigent_api.models.repository_test_result import (
 from contrigent_api.services.issue_image_input_builder import (
     build_input_with_issue_images,
 )
+from contrigent_api.services.worker_runner import (
+    build_project_with_proposed_files,
+)
+
+
 def build_proposed_files_section(
     proposed_files,
 ) -> str:
@@ -126,9 +137,16 @@ def build_reviewer_input(
             ]
         )
 
+    candidate_project = (
+        build_project_with_proposed_files(
+            sample_project,
+            proposed_files,
+        )
+    )
+
     repository_context = (
         build_repository_context(
-            sample_project.files,
+            candidate_project.files,
             query_text="\n".join(
                 query_parts
             ),
@@ -185,7 +203,7 @@ def build_reviewer_input(
 === APPROVED MANAGER ANALYSIS AND PLAN ===
 {issue_analysis.model_dump_json(indent=2)}
 
-=== ORIGINAL REPOSITORY CONTEXT ===
+=== CURRENT MATERIALIZED CANDIDATE CONTEXT ===
 {repository_context}
 
 === WORKER RESULTS ===
@@ -197,12 +215,15 @@ def build_reviewer_input(
 === CANDIDATE DOCKER TEST RESULT ===
 {candidate_test_text}
 
-=== PREVIOUS REVIEW CONTEXT ===
+=== PREVIOUS REVIEW CONTEXT — HISTORICAL ===
 {previous_review_text}
 
-If previous review context is present, use it to verify whether valid concerns
-were addressed, but independently reassess those findings against the current
-proposal and issue scope. Do not preserve a previous conclusion automatically.
+The CURRENT MATERIALIZED CANDIDATE CONTEXT and COMBINED PROPOSED FILES are
+authoritative. Previous review findings describe an earlier candidate state.
+Before repeating any previous finding, verify that the concern still exists in the
+current materialized candidate. If the current candidate no longer contains the
+behavior described by a previous finding, treat that finding as resolved and do not
+repeat it. Independently reassess all findings against the original issue and scope.
 """.strip()
 
 
@@ -215,6 +236,8 @@ async def run_reviewer(
     candidate_test_result: (
         RepositoryTestResult | None
     ) = None,
+    *,
+    run_id: UUID,
 ) -> ReviewerResult:
     reviewer_input = build_reviewer_input(
         sample_project,
@@ -224,12 +247,20 @@ async def run_reviewer(
         previous_reviewer_result,
         candidate_test_result,
     )
+    runner_input = build_input_with_issue_images(
+        reviewer_input,
+        sample_project,
+    )
+    configured_agent = (
+        configure_agent_for_run_invocation(
+            INDEPENDENT_REVIEWER_AGENT_ID,
+            independent_reviewer,
+            run_id,
+        )
+    )
     result = await Runner.run(
-        independent_reviewer,
-        build_input_with_issue_images(
-            reviewer_input,
-            sample_project,
-        ),
+        configured_agent,
+        runner_input,
         max_turns=3,
     )
 

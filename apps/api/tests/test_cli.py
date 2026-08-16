@@ -169,3 +169,38 @@ def test_run_progress_displays_failure_details(
         "ERROR collecting"
         in output
     )
+
+
+def test_repository_preflight_progress_is_displayed(
+    capsys,
+) -> None:
+    messages = (
+        ("preflight_started", "Repository preflight"),
+        (
+            "preflight_detecting",
+            "Detecting test environment",
+        ),
+        (
+            "preflight_verifying",
+            "Verifying untouched repository",
+        ),
+        (
+            "preflight_discovery",
+            "Setup specialist attempt 1/2",
+        ),
+        ("preflight_passed", "Baseline passed"),
+        ("analysis_started", "Starting issue analysis"),
+    )
+
+    for kind, message in messages:
+        show_run_progress(
+            RunProgressEvent(
+                kind=kind,
+                message=message,
+            )
+        )
+
+    output = capsys.readouterr().out
+
+    for _kind, message in messages:
+        assert message in output

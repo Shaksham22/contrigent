@@ -1,4 +1,5 @@
 from pathlib import Path
+import hashlib
 import re
 import shlex
 import subprocess
@@ -88,6 +89,40 @@ WORKFLOW_RUN_PATTERN = re.compile(
 WORKFLOW_KEY_PATTERN = re.compile(
     r"^([A-Za-z0-9_.-]+)\s*:\s*$"
 )
+
+REPOSITORY_SNAPSHOT_IGNORED_FOLDERS = {
+    ".git",
+    ".mypy_cache",
+    ".nox",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".tox",
+    ".venv",
+    "__pycache__",
+    "build",
+    "dist",
+    "node_modules",
+}
+
+PROTECTED_GENERATED_FILE_NAMES = {
+    "Pipfile.lock",
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "poetry.lock",
+    "pyproject.toml",
+    "uv.lock",
+    "yarn.lock",
+}
+
+PROTECTED_NEW_FILE_SUFFIXES = {
+    ".cfg",
+    ".ini",
+    ".json",
+    ".py",
+    ".toml",
+    ".yaml",
+    ".yml",
+}
 
 
 @dataclass(frozen=True)
@@ -1790,6 +1825,100 @@ def build_test_environment_command(
     )
 
 
+def repository_snapshot_ignores_path(
+    relative_path: Path,
+) -> bool:
+    return any(
+        part in REPOSITORY_SNAPSHOT_IGNORED_FOLDERS
+        or part.endswith(".egg-info")
+        for part in relative_path.parts
+    )
+
+
+def hash_file_contents(
+    file_path: Path,
+) -> str:
+    digest = hashlib.sha256()
+
+    with file_path.open("rb") as file:
+        while chunk := file.read(
+            1024 * 1024
+        ):
+            digest.update(chunk)
+
+    return digest.hexdigest()
+
+
+def snapshot_repository_files(
+    repository_path: Path,
+) -> dict[str, str]:
+    repository_root = repository_path.resolve()
+    snapshot: dict[str, str] = {}
+
+    for file_path in sorted(
+        repository_root.rglob("*")
+    ):
+        if (
+            not file_path.is_file()
+            or file_path.is_symlink()
+        ):
+            continue
+
+        relative_path = file_path.relative_to(
+            repository_root
+        )
+
+        if repository_snapshot_ignores_path(
+            relative_path
+        ):
+            continue
+
+        snapshot[
+            relative_path.as_posix()
+        ] = hash_file_contents(
+            file_path
+        )
+
+    return snapshot
+
+
+def is_protected_new_repository_file(
+    relative_path: str,
+) -> bool:
+    path = Path(relative_path)
+
+    return (
+        path.name in PROTECTED_GENERATED_FILE_NAMES
+        or path.name.startswith("requirements")
+        or path.suffix.lower()
+        in PROTECTED_NEW_FILE_SUFFIXES
+    )
+
+
+def find_repository_setup_mutations(
+    before: dict[str, str],
+    repository_path: Path,
+) -> list[str]:
+    after = snapshot_repository_files(
+        repository_path
+    )
+    mutations = {
+        path
+        for path, digest in before.items()
+        if after.get(path) != digest
+    }
+
+    mutations.update(
+        path
+        for path in after.keys() - before.keys()
+        if is_protected_new_repository_file(
+            path
+        )
+    )
+
+    return sorted(mutations)
+
+
 def describe_dependency_setup_evidence(
     repository_path: Path,
     pyproject_data: dict,
@@ -1970,6 +2099,34 @@ def run_repository_tests(
     proposed_files: list[FileReplacement] | None = None,
     issue_text: str | None = None,
 ) -> RepositoryTestResult:
+    repository_path = repository_path.resolve()
+
+    if not repository_path.is_dir():
+        raise RepositoryTestRunnerError(
+            "Repository folder does not exist."
+        )
+
+    strategy = build_repository_test_strategy(
+        repository_path,
+        issue_text,
+    )
+
+    return execute_repository_test_strategy(
+        repository_path,
+        strategy,
+        progress_callback=progress_callback,
+        proposed_files=proposed_files,
+    )
+
+
+def execute_repository_test_strategy(
+    repository_path: Path,
+    strategy: RepositoryTestStrategy,
+    progress_callback: ProgressCallback | None = None,
+    proposed_files: list[FileReplacement] | None = None,
+    *,
+    protect_repository_files: bool = False,
+) -> RepositoryTestResult:
     report_progress(
     progress_callback,
     5,
@@ -1983,9 +2140,18 @@ def run_repository_tests(
             "Repository folder does not exist."
         )
 
-    strategy = build_repository_test_strategy(
-            repository_path,
-            issue_text,
+    if protect_repository_files and proposed_files:
+        raise RepositoryTestRunnerError(
+            "Protected repository verification cannot "
+            "apply candidate files."
+        )
+
+    repository_snapshot = (
+        snapshot_repository_files(
+            repository_path
+        )
+        if protect_repository_files
+        else None
     )
     dependency_setup = " && ".join(
         strategy.dependency_setup_commands
@@ -2105,6 +2271,46 @@ def run_repository_tests(
                     stdout=dependency_stdout,
                     stderr=dependency_stderr,
                 )
+
+            if repository_snapshot is not None:
+                repository_mutations = (
+                    find_repository_setup_mutations(
+                        repository_snapshot,
+                        test_environment_path
+                        / "workspace",
+                    )
+                )
+
+                if repository_mutations:
+                    mutation_details = ", ".join(
+                        repository_mutations
+                    )
+                    report_progress(
+                        progress_callback,
+                        95,
+                        "Dependency setup modified repository files",
+                    )
+                    return RepositoryTestResult(
+                        passed=False,
+                        stage="dependency_setup",
+                        command=dependency_command,
+                        exit_code=1,
+                        duration_seconds=round(
+                            time.monotonic()
+                            - started_at,
+                            3,
+                        ),
+                        stdout=dependency_stdout,
+                        stderr=trim_command_output(
+                            (
+                                dependency_stderr
+                                + "\nRepository setup modified "
+                                "protected repository files: "
+                                + mutation_details
+                            ).strip()
+                        ),
+                    )
+
             report_progress(
                 progress_callback,
                 50,

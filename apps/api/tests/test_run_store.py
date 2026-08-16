@@ -11,6 +11,7 @@ from contrigent_api.models.repository_test_result import (
 from contrigent_api.models.run_record import RunStatus
 from contrigent_api.services.run_memory_store import (
     InvalidRunTransitionError,
+    RunNotFoundError,
     approve_plan,
     attach_analysis,
     finish_analysis_without_worker_work,
@@ -32,6 +33,16 @@ from contrigent_api.services.run_memory_store import (
     complete_push,
     start_draft_pr,
     complete_draft_pr,
+    get_verified_repository_test_recipe,
+    store_verified_repository_test_recipe,
+    get_agent_invocation_count,
+    record_agent_invocation,
+)
+from contrigent_api.services.repository_environment_verifier import (
+    VerifiedRepositoryTestRecipe,
+)
+from contrigent_api.services.repository_test_runner import (
+    RepositoryTestStrategy,
 )
 
 from contrigent_api.models.project_context import (
@@ -82,6 +93,109 @@ def test_new_run_starts_analyzing() -> None:
     assert run.status == RunStatus.ANALYZING
     assert run.analysis is None
     assert run.plan_approved is False
+
+
+def test_agent_invocation_counts_are_independent_per_run_and_agent(
+) -> None:
+    first_run = create_run("first")
+    second_run = create_run("second")
+
+    assert record_agent_invocation(
+        first_run.id,
+        "testing_specialist",
+    ) == 1
+    assert record_agent_invocation(
+        first_run.id,
+        "testing_specialist",
+    ) == 2
+    assert record_agent_invocation(
+        first_run.id,
+        "python_solver",
+    ) == 1
+    assert record_agent_invocation(
+        second_run.id,
+        "testing_specialist",
+    ) == 1
+
+    assert get_agent_invocation_count(
+        first_run.id,
+        "testing_specialist",
+    ) == 2
+    assert get_agent_invocation_count(
+        first_run.id,
+        "python_solver",
+    ) == 1
+    assert get_agent_invocation_count(
+        second_run.id,
+        "testing_specialist",
+    ) == 1
+
+
+def test_clear_runs_clears_agent_invocation_counts() -> None:
+    old_run = create_run("old")
+    record_agent_invocation(
+        old_run.id,
+        "testing_specialist",
+    )
+
+    clear_runs()
+
+    with pytest.raises(
+        RunNotFoundError,
+    ):
+        get_agent_invocation_count(
+            old_run.id,
+            "testing_specialist",
+        )
+
+    new_run = create_run("new")
+    assert get_agent_invocation_count(
+        new_run.id,
+        "testing_specialist",
+    ) == 0
+
+
+def test_verified_repository_recipe_is_stored_for_run() -> None:
+    run = create_run(
+        "example",
+        ProjectSource.GITHUB,
+    )
+    baseline_result = RepositoryTestResult(
+        passed=True,
+        stage="tests",
+        command=["pytest"],
+        exit_code=0,
+        duration_seconds=0.1,
+        stdout="2 passed",
+        stderr="",
+    )
+    recipe = VerifiedRepositoryTestRecipe(
+        strategy=RepositoryTestStrategy(
+            python_version="3.12",
+            dependency_setup_commands=(
+                "uv sync --group test",
+            ),
+            test_command="pytest",
+            evidence=("pyproject.toml",),
+        ),
+        baseline_result=baseline_result,
+        repository_revision="a" * 40,
+        verification_source="deterministic",
+        setup_verified=True,
+        discovery_attempts=0,
+    )
+
+    store_verified_repository_test_recipe(
+        run.id,
+        recipe,
+    )
+
+    assert (
+        get_verified_repository_test_recipe(
+            run.id
+        )
+        is recipe
+    )
 
 
 def test_analysis_moves_run_to_awaiting_approval() -> None:
