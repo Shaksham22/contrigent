@@ -11,6 +11,7 @@ from contrigent_api.agents.issue_analyzer.agent import (
     issue_analyzer,
 )
 from contrigent_api.agents.issue_analyzer.output_schema import (
+    Feasibility,
     IssueAnalysis,
     WorkerAssignment,
 )
@@ -398,7 +399,93 @@ async def replan_after_review(
         result.final_output,
         result.context_wrapper.usage,
     )
+def build_proposed_file_ownership_section(
+    worker_results: dict[str, WorkerResult],
+    proposed_files: list[FileReplacement],
+) -> str:
+    owners_by_path: dict[
+        str,
+        set[str],
+    ] = {}
 
+    for worker_id, result in (
+        worker_results.items()
+    ):
+        for replacement in (
+            result.files_to_replace
+        ):
+            owners_by_path.setdefault(
+                replacement.file_path,
+                set(),
+            ).add(
+                worker_id
+            )
+
+    lines = []
+
+    for replacement in proposed_files:
+        owners = sorted(
+            owners_by_path.get(
+                replacement.file_path,
+                set(),
+            )
+        )
+
+        owner_text = (
+            ", ".join(owners)
+            if owners
+            else "unknown"
+        )
+
+        lines.append(
+            (
+                f"{replacement.file_path} "
+                f"→ {owner_text}"
+            )
+        )
+
+    if not lines:
+        return (
+            "No proposed files."
+        )
+
+    return "\n".join(lines)
+
+
+def find_test_referenced_proposed_paths(
+    proposed_files: list[FileReplacement],
+    test_result: RepositoryTestResult,
+) -> list[str]:
+    test_output = (
+        test_result.stdout
+        + "\n"
+        + test_result.stderr
+    ).lower()
+
+    referenced_paths = []
+
+    for replacement in proposed_files:
+        file_path = (
+            replacement.file_path
+        )
+
+        file_name = (
+            file_path
+            .replace("\\", "/")
+            .rsplit("/", 1)[-1]
+        )
+
+        if (
+            file_path.lower()
+            in test_output
+            or file_name.lower()
+            in test_output
+        ):
+            referenced_paths.append(
+                file_path
+            )
+
+    return referenced_paths
 
 def build_test_failure_revision_input(
     project: ProjectContext,
@@ -438,6 +525,12 @@ def build_test_failure_revision_input(
             workers
         )
     )
+    proposed_file_ownership = (
+        build_proposed_file_ownership_section(
+            worker_results,
+            proposed_files,
+        )
+    )
 
     worker_results_text = "\n\n".join(
         f"--- WORKER: {worker_id} ---\n"
@@ -470,13 +563,60 @@ def build_test_failure_revision_input(
 
     return f"""
 === TEST FAILURE REMEDIATION TASK ===
-The current candidate was executed by Contrigent's deterministic Docker test runner
-and did not pass. Diagnose the supplied test evidence. Decide whether the failure comes
-from application code, a newly proposed test, an existing regression, dependency setup,
-or another issue-relevant cause. Create revised worker assignments only for work needed
-to make the candidate correct. Do not weaken or delete a valid failing test merely to
-make the suite green. Preserve valid existing and previously proposed tests unless a
-specific test is incorrect or no longer relevant.
+The current Contrigent candidate failed deterministic repository testing.
+
+First classify the failure using the supplied evidence. Use one of these conceptual
+categories:
+
+1. candidate_implementation_defect
+   The proposed implementation itself is incorrect.
+
+2. test_or_fixture_defect
+   A proposed test, fixture, test-data file, or test expectation is incorrect,
+   malformed, or insufficient.
+
+3. environment_or_configuration_defect
+   The candidate or repository setup has an actionable dependency, packaging,
+   configuration, build, or runtime problem.
+
+4. original_issue_failure
+   The candidate executes successfully enough to reach the reported behavior,
+   but the proposed solution still does not satisfy the original issue.
+
+5. insufficient_evidence
+   A supported correction cannot be identified because genuinely necessary
+   information is missing from the issue, repository, worker results, candidate,
+   or deterministic test evidence.
+
+A failed candidate is not automatically `needs_clarification`.
+
+If deterministic testing identifies an actionable defect in a file proposed by
+Contrigent, use PROPOSED FILE OWNERSHIP to understand which worker produced that file.
+Assign that worker again when appropriate, or another available specialist when its
+capabilities are a better match for the required correction.
+
+This applies generally to source code, tests, fixtures, configuration, packaging,
+database changes, frontend code, documentation, and other candidate files.
+
+Preserve parts of the candidate that are not contradicted by the execution evidence.
+
+Do not restart unrelated implementation work merely because another candidate file
+failed.
+
+Do not weaken, remove, or bypass a valid failing test merely to make the suite pass.
+
+Use `needs_clarification` only when genuinely missing information is required before a
+supported correction can be identified.
+
+If a supported correction can be attempted from the supplied evidence:
+
+- keep `feasibility` as `feasible`
+- create at least one worker assignment
+- make each assignment describe the concrete remediation
+- use dependencies only when the later worker actually requires revised output from
+  an earlier worker
+
+A failed candidate must not be returned as `feasible` with no worker assignments.
 
 === AVAILABLE WORKERS ===
 {available_workers}
@@ -496,6 +636,9 @@ specific test is incorrect or no longer relevant.
 === CURRENT WORKER RESULTS ===
 {worker_results_text}
 
+=== PROPOSED FILE OWNERSHIP ===
+{proposed_file_ownership}
+
 === CURRENT COMBINED PROPOSED FILES ===
 {proposed_files_text}
 
@@ -504,6 +647,57 @@ specific test is incorrect or no longer relevant.
 
 === REPOSITORY CONTEXT ===
 {repository_context}
+""".strip()
+
+def build_test_failure_reconsideration_input(
+    original_input: str,
+    previous_analysis: IssueAnalysis,
+    referenced_proposed_paths: list[str],
+) -> str:
+    referenced_files = "\n".join(
+        f"- {path}"
+        for path
+        in referenced_proposed_paths
+    )
+
+    return f"""
+{original_input}
+
+=== REMEDIATION DECISION RECONSIDERATION ===
+Your previous remediation decision would stop automatic development without producing
+a new candidate.
+
+However, deterministic test output explicitly references one or more files that are
+part of the current Contrigent candidate:
+
+{referenced_files}
+
+This does not prove that a repair is possible, and you must not invent one.
+
+Re-evaluate the failure once.
+
+Determine whether the supplied repository evidence, worker results, proposed file
+contents, file ownership, and deterministic test output provide enough information for
+an appropriate worker to attempt a concrete correction.
+
+If they do:
+
+- return `feasible`
+- assign the appropriate worker or workers
+- describe the concrete remediation task
+- preserve unaffected candidate work
+
+If genuinely necessary information is still missing:
+
+- return `needs_clarification`
+- identify exactly what information is missing
+- explain why the referenced candidate failure cannot be corrected from the supplied
+  evidence
+
+Do not return `needs_clarification` merely because the current candidate failed.
+
+=== PREVIOUS REMEDIATION DECISION ===
+{previous_analysis.model_dump_json(indent=2)}
 """.strip()
 
 
@@ -545,16 +739,86 @@ async def replan_after_test_failure(
             "unexpected output type."
         )
 
+    analysis = result.final_output
+
     validate_worker_assignments(
-        result.final_output.worker_assignments,
+        analysis.worker_assignments,
+        workers,
+    )
+
+    referenced_proposed_paths = (
+        find_test_referenced_proposed_paths(
+            proposed_files,
+            test_result,
+        )
+    )
+
+    should_reconsider = (
+        bool(
+            referenced_proposed_paths
+        )
+        and (
+            analysis.feasibility
+            == Feasibility.NEEDS_CLARIFICATION
+            or (
+                analysis.feasibility
+                == Feasibility.FEASIBLE
+                and not analysis.worker_assignments
+            )
+        )
+    )
+
+    if not should_reconsider:
+        return (
+            analysis,
+            result.context_wrapper.usage,
+        )
+
+    reconsideration_input = (
+        build_test_failure_reconsideration_input(
+            agent_input,
+            analysis,
+            referenced_proposed_paths,
+        )
+    )
+
+    reconsideration_result = (
+        await Runner.run(
+            issue_analyzer,
+            build_input_with_issue_images(
+                reconsideration_input,
+                project,
+            ),
+            max_turns=3,
+        )
+    )
+
+    if not isinstance(
+        reconsideration_result.final_output,
+        IssueAnalysis,
+    ):
+        raise TypeError(
+            "Issue Analyzer returned an "
+            "unexpected output type."
+        )
+
+    reconsidered_analysis = (
+        reconsideration_result.final_output
+    )
+
+    validate_worker_assignments(
+        reconsidered_analysis.worker_assignments,
         workers,
     )
 
     return (
-        result.final_output,
-        result.context_wrapper.usage,
+        reconsidered_analysis,
+        (
+            reconsideration_result
+            .context_wrapper
+            .usage
+        ),
     )
-
 
 async def analyze_sample_project(
     project_name: str,

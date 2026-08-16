@@ -7,6 +7,15 @@ import tomllib
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
+REASONING_EFFORT_CHOICES = {
+    "none",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+}
+
 CONTRIGENT_CODE_FOLDER = (
     PROJECT_ROOT
     / "apps"
@@ -111,6 +120,9 @@ def model_entry_already_exists(
 def add_agent_to_model_config(
     agent_id: str,
     model: str,
+    reasoning_effort: (
+        str | None
+    ) = None,
 ) -> None:
     text = MODEL_CONFIG_FILE.read_text(
         encoding="utf-8"
@@ -137,9 +149,22 @@ def add_agent_to_model_config(
             insert_index = index
             break
 
+    model_entry = (
+        f'{agent_id} = '
+        f'{{ model = "{model}"'
+    )
+
+    if reasoning_effort is not None:
+        model_entry += (
+            ", reasoning_effort = "
+            f'"{reasoning_effort}"'
+        )
+
+    model_entry += " }"
+
     lines.insert(
         insert_index,
-        f'{agent_id} = "{model}"',
+        model_entry,
     )
 
     updated_text = "\n".join(lines) + "\n"
@@ -171,10 +196,19 @@ def create_agent(
     model: str,
     target_path: str | None = None,
     agent_type: str = "worker",
+    reasoning_effort: (
+        str | None
+    ) = None,
 ) -> None:
     clean_agent_name = agent_name.strip()
     clean_description = description.strip()
     clean_model = model.strip()
+    clean_reasoning_effort = (
+        reasoning_effort.strip()
+        if reasoning_effort
+        is not None
+        else None
+    )
     clean_agent_type = agent_type.strip()
 
     if not clean_agent_name:
@@ -226,6 +260,15 @@ def create_agent(
         raise ValueError(
             "Agent already exists in "
             f"agent_models.toml: {agent_id}"
+        )
+    if (
+        clean_reasoning_effort
+        is not None
+        and clean_reasoning_effort
+        not in REASONING_EFFORT_CHOICES
+    ):
+        raise ValueError(
+            "Invalid reasoning effort."
         )
 
     agent_folder = (
@@ -289,43 +332,21 @@ capabilities = []
 __all__ = ["WorkerResult"]
 """,
 
-        "agent.py": f'''from pathlib import Path
-import tomllib
+                "agent.py": f'''from pathlib import Path
 
 from agents import Agent
+
+from contrigent_api.services.agent_model_config import (
+    build_agent_model_arguments,
+)
 
 from .output_schema import WorkerResult
 
 
 AGENT_ID = "{agent_id}"
 
-AGENT_FOLDER = Path(__file__).resolve().parent
-
-
-def find_model_config_file() -> Path:
-    current_folder = AGENT_FOLDER
-
-    while True:
-        candidate = (
-            current_folder
-            / "agent_models.toml"
-        )
-
-        if candidate.exists():
-            return candidate
-
-        if current_folder == current_folder.parent:
-            break
-
-        current_folder = current_folder.parent
-
-    raise FileNotFoundError(
-        "Could not find agent_models.toml."
-    )
-
-
-MODEL_CONFIG_FILE = (
-    find_model_config_file()
+AGENT_FOLDER = (
+    Path(__file__).resolve().parent
 )
 
 
@@ -339,18 +360,17 @@ def read_agent_definition(
     )
 
 
-def get_assigned_model() -> str:
-    with MODEL_CONFIG_FILE.open("rb") as file:
-        config = tomllib.load(file)
-
-    return config["agents"][AGENT_ID]
-
-
 agent_instructions = "\\n\\n".join(
     [
-        read_agent_definition("identity.md"),
-        read_agent_definition("job.md"),
-        read_agent_definition("rules.md"),
+        read_agent_definition(
+            "identity.md"
+        ),
+        read_agent_definition(
+            "job.md"
+        ),
+        read_agent_definition(
+            "rules.md"
+        ),
     ]
 )
 
@@ -358,8 +378,10 @@ agent_instructions = "\\n\\n".join(
 agent = Agent(
     name="{clean_agent_name}",
     instructions=agent_instructions,
-    model=get_assigned_model(),
     output_type=WorkerResult,
+    **build_agent_model_arguments(
+        AGENT_ID
+    ),
 )
 ''',
     }
@@ -377,8 +399,8 @@ agent = Agent(
         add_agent_to_model_config(
             agent_id,
             clean_model,
+            clean_reasoning_effort,
         )
-
     except Exception:
         if agent_folder.exists():
             shutil.rmtree(
@@ -443,6 +465,17 @@ def main() -> None:
             'Default: "worker".'
         ),
     )
+    parser.add_argument(
+        "--reasoning-effort",
+        default=None,
+        choices=sorted(
+            REASONING_EFFORT_CHOICES
+        ),
+        help=(
+            "Optional reasoning effort "
+            "for this agent."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -452,8 +485,10 @@ def main() -> None:
         model=args.model,
         target_path=args.path,
         agent_type=args.agent_type,
+        reasoning_effort=(
+            args.reasoning_effort
+        ),
     )
-
 
 if __name__ == "__main__":
     main()

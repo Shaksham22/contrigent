@@ -2,7 +2,12 @@ from contrigent_api.cli.prompts import (
     ask_for_approval,
     ask_for_round_limit,
 )
-
+from contrigent_api.cli.display import (
+    show_run_progress,
+)
+from contrigent_api.services.run_progress import (
+    RunProgressEvent,
+)
 
 def test_approval_accepts_yes(
     monkeypatch,
@@ -124,4 +129,43 @@ def test_round_limit_rejects_invalid_value(
             "Maximum review rounds",
         )
         == 4
+    )
+
+def test_run_progress_displays_failure_details(
+    capsys,
+) -> None:
+    show_run_progress(
+        RunProgressEvent(
+            kind="testing_failed",
+            message=(
+                "Candidate tests failed"
+            ),
+            details=(
+                "Stage: tests",
+                "Exit code: 2",
+                (
+                    "ERROR collecting "
+                    "tests/test_example.py"
+                ),
+            ),
+        )
+    )
+
+    output = (
+        capsys.readouterr().out
+    )
+
+    assert (
+        "Candidate tests failed"
+        in output
+    )
+
+    assert (
+        "Exit code: 2"
+        in output
+    )
+
+    assert (
+        "ERROR collecting"
+        in output
     )

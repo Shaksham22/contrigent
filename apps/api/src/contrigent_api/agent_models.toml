@@ -1,11 +1,13 @@
 [agents]
-issue_analyzer = "gpt-5.4-mini"
-code_editor = "gpt-5.4-mini"
-python_solver = "gpt-5.4-mini"
-testing_specialist = "gpt-5.4-mini"
-independent_reviewer = "gpt-5.4-mini"
-pull_request_documentation_agent = "gpt-5.4-mini"
-frontend_solver = "gpt-5.4-mini"
-documentation_specialist = "gpt-5.4-mini"
-database_solver = "gpt-5.4-mini"
-configuration_specialist = "gpt-5.4-mini"
+#issue_analyzer = { model = "gpt-5.6-sol", reasoning_effort = "high" }
+issue_analyzer = { model = "gpt-5.4-mini"}
+code_editor = { model = "gpt-5.4-mini" }
+python_solver = { model = "gpt-5.4-mini" }
+testing_specialist = { model = "gpt-5.4-mini" }
+independent_reviewer = { model = "gpt-5.4-mini" }
+pull_request_documentation_agent = { model = "gpt-5.4-mini" }
+frontend_solver = { model = "gpt-5.4-mini" }
+documentation_specialist = { model = "gpt-5.4-mini" }
+database_solver = { model = "gpt-5.4-mini" }
+configuration_specialist = { model = "gpt-5.4-mini" }
+advanced_solver = { model = "gpt-5.6-sol", reasoning_effort = "high" }

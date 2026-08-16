@@ -1,6 +1,9 @@
 from pathlib import Path
 import tomllib
-
+from contrigent_api.services.agent_model_config import (
+    AgentModelConfig,
+    load_agent_model_configs,
+)
 
 BASE_FOLDER = Path(__file__).resolve().parents[1]
 
@@ -15,12 +18,13 @@ MODEL_CONFIG_FILE = (
     / "agent_models.toml"
 )
 
-
-def load_agent_models() -> dict[str, str]:
-    with MODEL_CONFIG_FILE.open("rb") as file:
-        config = tomllib.load(file)
-
-    return config.get("agents", {})
+def load_agent_models() -> dict[
+    str,
+    AgentModelConfig,
+]:
+    return load_agent_model_configs(
+        MODEL_CONFIG_FILE
+    )
 
 
 def discover_workers() -> list[dict]:
@@ -67,9 +71,16 @@ def discover_workers() -> list[dict]:
             False,
         )
 
-        model = agent_models.get(worker_id)
+        model_config = (
+            agent_models.get(
+                worker_id
+            )
+        )
 
-        if enabled and model is None:
+        if (
+            enabled
+            and model_config is None
+        ):
             raise ValueError(
                 f"Enabled worker has no model configured: {worker_id}"
             )
@@ -90,7 +101,12 @@ def discover_workers() -> list[dict]:
                     [],
                 ),
                 "enabled": enabled,
-                "model": model,
+                "model": (
+                    model_config.model
+                    if model_config
+                    is not None
+                    else None
+                ),
             }
         )
 

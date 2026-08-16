@@ -173,6 +173,7 @@ def start_test_revision_worker_work(
     if (
         run.candidate_test_result is None
         or run.candidate_test_result.passed
+        or run.candidate_test_result.stage != "tests"
     ):
         raise InvalidRunTransitionError(
             "Test remediation requires a failed "
@@ -188,10 +189,10 @@ def start_test_revision_worker_work(
         )
 
     run.analysis = revised_analysis
-
-    # The workers are about to create a new candidate.
-    # The previous test result no longer describes it.
-    run.candidate_test_result = None
+    # Keep the failed test result available as
+    # remediation evidence until the next candidate
+    # is actually tested. record_candidate_test_result()
+    # will replace it with the next testing result.
 
     run.worker_work_completed = False
     run.status = RunStatus.RUNNING_WORKERS
@@ -271,14 +272,17 @@ def record_candidate_test_result(
         )
 
     if (
-        run.testing_rounds_completed
+        test_result.stage == "tests"
+        and run.testing_rounds_completed
         >= run.max_testing_rounds
     ):
         raise InvalidRunTransitionError(
             "No candidate testing rounds remain."
         )
 
-    run.testing_rounds_completed += 1
+    if test_result.stage == "tests":
+        run.testing_rounds_completed += 1
+
     run.candidate_test_result = test_result
 
     return run

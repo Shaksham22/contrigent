@@ -3,6 +3,11 @@ from uuid import UUID
 from contrigent_api.models.project_context import (
     ProjectSource,
 )
+from contrigent_api.services.run_progress import (
+    RunProgressCallback,
+    build_test_failure_details,
+    report_run_progress,
+)
 from contrigent_api.services.pull_request_documentation_runner import (
     run_pull_request_documentation,
 )
@@ -47,6 +52,9 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from contrigent_api.models.run_record import Run
+from contrigent_api.models.worker_result import (
+    FileReplacement,
+)
 from contrigent_api.agents.issue_analyzer.output_schema import (
     Feasibility,
 )
@@ -101,7 +109,15 @@ from contrigent_api.services.worker_runner import (
 from contrigent_api.services.reviewer_runner import (
     run_reviewer,
 )
-
+def candidate_file_contents(
+    proposed_files: list[FileReplacement],
+) -> dict[str, str]:
+    return {
+        replacement.file_path:
+        replacement.replacement_content
+        for replacement
+        in proposed_files
+    }
 
 router = APIRouter(
     prefix="/runs",
@@ -278,6 +294,17 @@ async def start_run(
 async def approve_run_plan(
     run_id: UUID,
 ) -> Run:
+    return await run_approved_plan(
+        run_id
+    )
+
+
+async def run_approved_plan(
+    run_id: UUID,
+    progress_callback: (
+        RunProgressCallback | None
+    ) = None,
+) -> Run:
     try:
         run = approve_plan(
             run_id
@@ -301,6 +328,9 @@ async def approve_run_plan(
             await run_assigned_workers(
                 project,
                 run.analysis,
+                progress_callback=(
+                    progress_callback
+                ),
             )
         )
 
@@ -321,12 +351,45 @@ async def approve_run_plan(
                 == ProjectSource.GITHUB
             ):
                 while True:
+                    testing_round = (
+                        run.testing_rounds_completed
+                        + 1
+                    )
+
+                    report_run_progress(
+                        progress_callback,
+                        "testing_started",
+                        (
+                            "Candidate testing — "
+                            f"round {testing_round} "
+                            f"of "
+                            f"{run.max_testing_rounds}"
+                        ),
+                    )
+
+                    def candidate_test_progress(
+                        percentage: int,
+                        message: str,
+                    ) -> None:
+                        report_run_progress(
+                            progress_callback,
+                            "testing_progress",
+                            (
+                                f"{percentage}% — "
+                                f"{message}"
+                            ),
+                        )
+
                     candidate_test_result = (
                         run_repository_tests(
                             project.repository_path,
+                            progress_callback=(
+                                candidate_test_progress
+                            ),
                             proposed_files=(
                                 run.proposed_files
                             ),
+                            issue_text=project.issue,
                         )
                     )
 
@@ -338,14 +401,96 @@ async def approve_run_plan(
                     )
 
                     if (
+                        candidate_test_result.stage
+                        == "dependency_setup"
+                    ):
+                        report_run_progress(
+                            progress_callback,
+                            "testing_failed",
+                            (
+                                "Repository dependency "
+                                "setup failed before "
+                                "candidate tests"
+                            ),
+                            build_test_failure_details(
+                                candidate_test_result
+                            ),
+                        )
+
+                        report_run_progress(
+                            progress_callback,
+                            "stopped",
+                            (
+                                "Candidate tests were "
+                                "not run"
+                            ),
+                            (
+                                (
+                                    "Dependency setup "
+                                    "failures do not consume "
+                                    "candidate testing rounds "
+                                    "and are not sent to "
+                                    "worker remediation."
+                                ),
+                            ),
+                        )
+
+                        return fail_run(
+                            run_id
+                        )
+
+                    if (
                         candidate_test_result.passed
                     ):
+                        report_run_progress(
+                            progress_callback,
+                            "testing_passed",
+                            (
+                                "Candidate tests "
+                                "passed"
+                            ),
+                            (
+                                (
+                                    "Round: "
+                                    f"{testing_round}"
+                                ),
+                            ),
+                        )
+
                         break
+
+                    report_run_progress(
+                        progress_callback,
+                        "testing_failed",
+                        (
+                            "Candidate tests "
+                            "failed"
+                        ),
+                        build_test_failure_details(
+                            candidate_test_result
+                        ),
+                    )
 
                     if (
                         run.testing_rounds_completed
                         >= run.max_testing_rounds
                     ):
+                        report_run_progress(
+                            progress_callback,
+                            "stopped",
+                            (
+                                "Automatic testing "
+                                "limit reached"
+                            ),
+                            (
+                                (
+                                    "Contrigent used "
+                                    f"{run.testing_rounds_completed} "
+                                    "testing rounds."
+                                ),
+                            ),
+                        )
+
                         return fail_run(
                             run_id
                         )
@@ -367,6 +512,15 @@ async def approve_run_plan(
                             run.proposed_files
                         )
                     )
+                    report_run_progress(
+                        progress_callback,
+                        "manager_revision_started",
+                        (
+                            "Issue Analyzer is "
+                            "reviewing the test "
+                            "failure"
+                        ),
+                    )
 
                     (
                         revised_analysis,
@@ -380,6 +534,85 @@ async def approve_run_plan(
                             candidate_test_result,
                         )
                     )
+
+                    revised_assignment_details = tuple(
+                        (
+                            f"{assignment.worker_id}: "
+                            f"{assignment.task}"
+                        )
+                        for assignment
+                        in sorted(
+                            revised_analysis
+                            .worker_assignments,
+                            key=lambda item: (
+                                item.order
+                            ),
+                        )
+                    )
+
+                    report_run_progress(
+                        progress_callback,
+                        "manager_revision_completed",
+                        (
+                            "Issue Analyzer revised "
+                            "the approach"
+                        ),
+                        (
+                            (
+                                "Conclusion: "
+                                f"{revised_analysis.summary}"
+                            ),
+                            *revised_assignment_details,
+                        ),
+                    )
+
+                    if (
+                        revised_analysis.feasibility
+                        != Feasibility.FEASIBLE
+                    ):
+                        report_run_progress(
+                            progress_callback,
+                            "stopped",
+                            (
+                                "No supported test "
+                                "remediation was found"
+                            ),
+                            (
+                                revised_analysis.summary,
+                            ),
+                        )
+
+                        return fail_run(
+                            run_id
+                        )
+
+                    if (
+                        not revised_analysis
+                        .worker_assignments
+                    ):
+                        report_run_progress(
+                            progress_callback,
+                            "stopped",
+                            (
+                                "No new candidate "
+                                "was produced"
+                            ),
+                            (
+                                (
+                                    "The current candidate "
+                                    "still fails tests, but "
+                                    "the Issue Analyzer "
+                                    "assigned no remediation "
+                                    "work. Contrigent will "
+                                    "not retest the unchanged "
+                                    "candidate."
+                                ),
+                            ),
+                        )
+
+                        return fail_run(
+                            run_id
+                        )
 
                     revision_project = (
                         build_project_with_proposed_files(
@@ -402,6 +635,9 @@ async def approve_run_plan(
                         revision_project,
                         revised_analysis,
                         candidate_test_result,
+                        progress_callback=(
+                            progress_callback
+                        ),
                     )
 
                     final_proposed_files = (
@@ -412,14 +648,62 @@ async def approve_run_plan(
                         )
                     )
 
+                    if (
+                        candidate_file_contents(
+                            final_proposed_files
+                        )
+                        == candidate_file_contents(
+                            current_proposed_files
+                        )
+                    ):
+                        report_run_progress(
+                            progress_callback,
+                            "stopped",
+                            (
+                                "Remediation produced "
+                                "no candidate changes"
+                            ),
+                            (
+                                (
+                                    "Workers completed, "
+                                    "but the proposed file "
+                                    "contents are unchanged. "
+                                    "Contrigent will not "
+                                    "spend another testing "
+                                    "round on the same "
+                                    "candidate."
+                                ),
+                            ),
+                        )
+
+                        return fail_run(
+                            run_id
+                        )
+
                     run = complete_worker_work(
                         run_id,
                         revised_worker_results,
                         final_proposed_files,
                     )
 
+            review_round = (
+                run.review_rounds_completed
+                + 1
+            )
+
             run = start_review(
                 run_id
+            )
+
+            report_run_progress(
+                progress_callback,
+                "review_started",
+                (
+                    "Independent Reviewer "
+                    f"started — round "
+                    f"{review_round} of "
+                    f"{run.max_review_rounds}"
+                ),
             )
 
             reviewer_result = (
@@ -441,10 +725,54 @@ async def approve_run_plan(
                 reviewer_result.recommendation
                 == "approve"
             ):
+                report_run_progress(
+                    progress_callback,
+                    "review_approved",
+                    (
+                        "Independent Reviewer "
+                        "approved the solution"
+                    ),
+                    (
+                        (
+                            "Summary: "
+                            f"{reviewer_result.summary}"
+                        ),
+                    ),
+                )
+
                 return complete_review(
                     run_id,
                     reviewer_result,
                 )
+
+            reviewer_details = [
+                (
+                    "Summary: "
+                    f"{reviewer_result.summary}"
+                )
+            ]
+
+            reviewer_details.extend(
+                (
+                    f"[{finding.severity}] "
+                    f"{finding.category}: "
+                    f"{finding.description}"
+                )
+                for finding
+                in reviewer_result.findings
+            )
+
+            report_run_progress(
+                progress_callback,
+                "review_changes_required",
+                (
+                    "Independent Reviewer "
+                    "requested changes"
+                ),
+                tuple(
+                    reviewer_details
+                ),
+            )
 
             another_review_is_allowed = (
                 run.review_rounds_completed
@@ -487,6 +815,15 @@ async def approve_run_plan(
             current_proposed_files = list(
                 run.proposed_files
             )
+            report_run_progress(
+                progress_callback,
+                "manager_revision_started",
+                (
+                    "Issue Analyzer is "
+                    "reviewing the Reviewer "
+                    "feedback"
+                ),
+            )
 
             (
                 revised_analysis,
@@ -498,6 +835,36 @@ async def approve_run_plan(
                 current_proposed_files,
                 reviewer_result,
                 run.candidate_test_result,
+            )
+            revised_assignment_details = tuple(
+                (
+                    f"{assignment.worker_id}: "
+                    f"{assignment.task}"
+                )
+                for assignment
+                in sorted(
+                    revised_analysis
+                    .worker_assignments,
+                    key=lambda item: (
+                        item.order
+                    ),
+                )
+            )
+
+            report_run_progress(
+                progress_callback,
+                "manager_revision_completed",
+                (
+                    "Issue Analyzer revised "
+                    "the approach"
+                ),
+                (
+                    (
+                        "Conclusion: "
+                        f"{revised_analysis.summary}"
+                    ),
+                    *revised_assignment_details,
+                ),
             )
 
             revision_project = (
@@ -519,6 +886,9 @@ async def approve_run_plan(
             ) = await run_assigned_workers(
                 revision_project,
                 revised_analysis,
+                progress_callback=(
+                    progress_callback
+                ),
             )
 
             final_proposed_files = (
@@ -528,6 +898,38 @@ async def approve_run_plan(
                     revised_proposed_files,
                 )
             )
+
+            if (
+                candidate_file_contents(
+                    final_proposed_files
+                )
+                == candidate_file_contents(
+                    current_proposed_files
+                )
+            ):
+                report_run_progress(
+                    progress_callback,
+                    "stopped",
+                    (
+                        "Remediation produced "
+                        "no candidate changes"
+                    ),
+                    (
+                        (
+                            "Workers completed, "
+                            "but the proposed file "
+                            "contents are unchanged. "
+                            "Contrigent will not "
+                            "spend another testing "
+                            "round on the same "
+                            "candidate."
+                        ),
+                    ),
+                )
+
+                return fail_run(
+                    run_id
+                )
 
             run = complete_worker_work(
                 run_id,
@@ -678,9 +1080,9 @@ def approve_run_final_changes(
         run = start_repository_tests(
             run.id
         )
-
         test_result = run_repository_tests(
-            repository_path
+            repository_path,
+            issue_text=project.issue,
         )
 
         run = complete_repository_tests(

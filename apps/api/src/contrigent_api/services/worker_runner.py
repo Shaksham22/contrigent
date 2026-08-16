@@ -3,7 +3,10 @@ from pathlib import PurePosixPath
 from contrigent_api.services.repository_context_builder import (
     build_repository_context,
 )
-
+from contrigent_api.services.run_progress import (
+    RunProgressCallback,
+    report_run_progress,
+)
 from agents import Runner
 
 from contrigent_api.agents.issue_analyzer.output_schema import (
@@ -26,6 +29,17 @@ from contrigent_api.services.worker_discovery import (
 )
 from contrigent_api.services.issue_image_input_builder import (
     build_input_with_issue_images,
+)
+
+TOOL_GENERATED_DEPENDENCY_FILES = frozenset(
+    {
+        "uv.lock",
+        "poetry.lock",
+        "Pipfile.lock",
+        "package-lock.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+    }
 )
 
 
@@ -89,6 +103,12 @@ def validate_replacement_path(
     if path.is_absolute() or ".." in path.parts:
         raise ValueError(
             f"Worker returned an unsafe replacement path: {file_path}"
+        )
+
+    if path.name in TOOL_GENERATED_DEPENDENCY_FILES:
+        raise ValueError(
+            "Worker returned a tool-generated dependency "
+            f"file that LLM workers cannot author: {file_path}"
         )
 
     return path.as_posix()
@@ -364,12 +384,14 @@ async def run_worker(
         sample_project,
     )
 
-
 async def run_assigned_workers(
     sample_project: ProjectContext,
     issue_analysis: IssueAnalysis,
     candidate_test_result: (
         RepositoryTestResult | None
+    ) = None,
+    progress_callback: (
+        RunProgressCallback | None
     ) = None,
 ) -> tuple[
     dict[str, WorkerResult],
@@ -387,6 +409,36 @@ async def run_assigned_workers(
     )
 
     for assignment in assignments:
+        report_run_progress(
+            progress_callback,
+            "worker_started",
+            (
+                f"{assignment.worker_id} "
+                "started"
+            ),
+            (
+                f"Task: {assignment.task}",
+            ),
+        )
+        missing_dependencies = [
+            dependency_id
+            for dependency_id
+            in assignment.depends_on
+            if dependency_id
+            not in worker_results
+        ]
+
+        if missing_dependencies:
+            raise ValueError(
+                (
+                    f"Worker '{assignment.worker_id}' "
+                    "cannot start because dependency "
+                    "results are unavailable: "
+                )
+                + ", ".join(
+                    missing_dependencies
+                )
+            )
         shared_worker_results = {
             dependency_id: worker_results[
                 dependency_id
@@ -407,6 +459,41 @@ async def run_assigned_workers(
         worker_results[
             assignment.worker_id
         ] = worker_result
+
+        changed_files = tuple(
+            replacement.file_path
+            for replacement
+            in worker_result.files_to_replace
+        )
+
+        worker_details = [
+            (
+                "Summary: "
+                f"{worker_result.summary}"
+            )
+        ]
+
+        if changed_files:
+            worker_details.append(
+                "Proposed files: "
+                + ", ".join(
+                    changed_files
+                )
+            )
+        else:
+            worker_details.append(
+                "Proposed files: none"
+            )
+
+        report_run_progress(
+            progress_callback,
+            "worker_completed",
+            (
+                f"{assignment.worker_id} "
+                "completed"
+            ),
+            tuple(worker_details),
+        )
 
         for replacement in (
             worker_result.files_to_replace

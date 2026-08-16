@@ -1,0 +1,10 @@
+id = "advanced_solver"
+name = "Advanced Solver"
+agent_type = "worker"
+enabled = true
+
+description = """
+Handles complex implementation work.
+"""
+
+capabilities = []

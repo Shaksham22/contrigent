@@ -12,6 +12,9 @@ from contrigent_api.models.run_record import (
     Run,
 )
 
+from contrigent_api.services.run_progress import (
+    RunProgressEvent,
+)
 
 def show_header() -> None:
     print()
@@ -240,13 +243,54 @@ def show_solution_not_found(
         "No pull request was created."
     )
 
-
 def show_implementation_started() -> None:
     print()
     print(
-        "Implementing and reviewing "
-        "solution..."
+        "Implementation and review"
     )
+    print(
+        "-------------------------"
+    )
+    print()
+
+
+def show_run_progress(
+    event: RunProgressEvent,
+) -> None:
+    if event.kind == "testing_progress":
+        print(
+            f"  {event.message}"
+        )
+        return
+
+    symbols = {
+        "worker_started": "→",
+        "worker_completed": "✓",
+        "testing_started": "→",
+        "testing_passed": "✓",
+        "testing_failed": "✗",
+        "manager_revision_started": "→",
+        "manager_revision_completed": "✓",
+        "review_started": "→",
+        "review_approved": "✓",
+        "review_changes_required": "✗",
+        "stopped": "✗",
+    }
+
+    symbol = symbols.get(
+        event.kind,
+        "→",
+    )
+
+    print(
+        f"{symbol} {event.message}"
+    )
+
+    for detail in event.details:
+        print(
+            f"  {detail}"
+        )
+
     print()
 
 

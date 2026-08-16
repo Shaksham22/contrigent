@@ -1,13 +1,17 @@
 from pathlib import Path
-import tomllib
+from contrigent_api.services.agent_model_config import (
+    build_agent_model_arguments,
+)
 
 from agents import Agent
 
 from .output_schema import CodeEditResult
 
+AGENT_ID = "code_editor"
+
 
 AGENT_FOLDER = Path(__file__).resolve().parent
-CONFIG_FILE = AGENT_FOLDER.parents[1] / "agent_models.toml"
+
 
 
 def read_agent_definition(filename: str) -> str:
@@ -16,11 +20,6 @@ def read_agent_definition(filename: str) -> str:
     )
 
 
-def get_assigned_model(agent_name: str) -> str:
-    with CONFIG_FILE.open("rb") as file:
-        config = tomllib.load(file)
-
-    return config["agents"][agent_name]
 
 
 agent_instructions = "\n\n".join(
@@ -35,6 +34,8 @@ agent_instructions = "\n\n".join(
 code_editor = Agent(
     name="Code Editor",
     instructions=agent_instructions,
-    model=get_assigned_model("code_editor"),
+    **build_agent_model_arguments(
+        AGENT_ID
+    ),
     output_type=CodeEditResult,
 )

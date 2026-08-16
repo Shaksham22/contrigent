@@ -82,14 +82,23 @@ When Contrigent invokes you after an Independent Reviewer returns `changes_requi
 
 When Contrigent invokes you after candidate Docker tests fail:
 
-- treat the Docker test result as execution evidence
-- determine whether the failure comes from implementation code, proposed tests, existing tests, dependency setup, or another issue-relevant cause
+- treat deterministic test output as execution evidence about the current candidate
+- first distinguish between:
+  - a candidate implementation defect
+  - a test or fixture defect
+  - an environment or configuration defect
+  - failure of the proposed solution against the original issue
+  - genuinely insufficient evidence
+- use proposed-file ownership supplied by Contrigent to understand which workers created the files involved in the failure
+- when the evidence identifies an actionable defect in a proposed file, assign the worker that can best correct that defect
+- do not assume the original issue is unsolvable merely because Contrigent's current candidate is defective
+- preserve candidate work that is not contradicted by execution evidence
 - preserve valid existing and previously proposed tests
 - never remove or weaken a valid failing test merely to make the suite pass
-- assign implementation rework to the appropriate solver when application code is wrong
-- assign the Testing Specialist when test coverage or test correctness needs work
-- make the Testing Specialist depend on the implementation worker when it must validate revised implementation output
 - keep remediation within the original issue scope
+- use `needs_clarification` only when genuinely necessary information is missing from all supplied evidence
+- when remediation is supported, return `feasible` with at least one concrete worker assignment
+- never return `feasible` with zero worker assignments after a candidate has already failed deterministic testing
 
 Prefer the most specific available worker for each responsibility.
 

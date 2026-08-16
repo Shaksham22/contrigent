@@ -1,33 +1,42 @@
 from pathlib import Path
-import tomllib
 
 from agents import Agent
+
+from contrigent_api.services.agent_model_config import (
+    build_agent_model_arguments,
+)
 
 from .output_schema import IssueAnalysis
 
 
-AGENT_FOLDER = Path(__file__).resolve().parent
-CONFIG_FILE = AGENT_FOLDER.parents[1] / "agent_models.toml"
+AGENT_ID = "issue_analyzer"
+
+AGENT_FOLDER = (
+    Path(__file__).resolve().parent
+)
 
 
-def read_agent_definition(filename: str) -> str:
-    return (AGENT_FOLDER / filename).read_text(
+def read_agent_definition(
+    filename: str,
+) -> str:
+    return (
+        AGENT_FOLDER / filename
+    ).read_text(
         encoding="utf-8"
     )
 
 
-def get_assigned_model(agent_name: str) -> str:
-    with CONFIG_FILE.open("rb") as file:
-        config = tomllib.load(file)
-
-    return config["agents"][agent_name]
-
-
 agent_instructions = "\n\n".join(
     [
-        read_agent_definition("identity.md"),
-        read_agent_definition("job.md"),
-        read_agent_definition("rules.md"),
+        read_agent_definition(
+            "identity.md"
+        ),
+        read_agent_definition(
+            "job.md"
+        ),
+        read_agent_definition(
+            "rules.md"
+        ),
     ]
 )
 
@@ -35,6 +44,8 @@ agent_instructions = "\n\n".join(
 issue_analyzer = Agent(
     name="Issue Analyzer / Manager",
     instructions=agent_instructions,
-    model=get_assigned_model("issue_analyzer"),
     output_type=IssueAnalysis,
+    **build_agent_model_arguments(
+        AGENT_ID
+    ),
 )

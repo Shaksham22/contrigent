@@ -21,6 +21,7 @@ from contrigent_api.cli.display import (
     show_execution_started,
     show_header,
     show_implementation_started,
+    show_run_progress,
     show_no_changes_needed,
     show_plan,
     show_plan_details,
@@ -45,7 +46,7 @@ from contrigent_api.models.run_record import (
 from contrigent_api.routes.run_routes import (
     CreateRunRequest,
     approve_run_final_changes,
-    approve_run_plan,
+    run_approved_plan,
     start_run,
 )
 from contrigent_api.services.project_reader import (
@@ -298,10 +299,12 @@ def main() -> None:
             return
 
         show_implementation_started()
-
         run = asyncio.run(
-            approve_run_plan(
-                run.id
+            run_approved_plan(
+                run.id,
+                progress_callback=(
+                    show_run_progress
+                ),
             )
         )
 

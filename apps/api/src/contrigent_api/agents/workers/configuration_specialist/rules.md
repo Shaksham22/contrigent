@@ -8,6 +8,7 @@
 - Do not add dependencies unless the issue requires them.
 - Do not perform dependency-upgrade-only work unless explicitly required by the issue.
 - Do not introduce a new build system, package manager, CI provider, or framework without strong repository evidence.
+- Never author or fabricate a tool-generated dependency lockfile such as `uv.lock`, `poetry.lock`, `Pipfile.lock`, `package-lock.json`, `pnpm-lock.yaml`, or `yarn.lock`; if regeneration is required, it must be performed by the deterministic tool that owns that file.
 - Never expose or invent credentials, tokens, or secrets.
 - Do not weaken security controls merely to make CI or tests pass.
 - Do not publish, push, or merge changes.

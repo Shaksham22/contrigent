@@ -9,6 +9,7 @@ from contrigent_api.agents.issue_analyzer.output_schema import (
     Feasibility,
     ImplementationStep,
     IssueAnalysis,
+    WorkerAssignment,
 )
 from contrigent_api.models.project_context import (
     ProjectContext,
@@ -110,6 +111,21 @@ def make_test_result(
     )
 
 
+def make_dependency_setup_failure() -> RepositoryTestResult:
+    return RepositoryTestResult(
+        passed=False,
+        stage="dependency_setup",
+        command=[
+            "uv",
+            "sync",
+        ],
+        exit_code=1,
+        duration_seconds=0.1,
+        stdout="",
+        stderr="Dependency setup failed.",
+    )
+
+
 def make_worker_result(
     summary: str,
 ) -> tuple[
@@ -140,7 +156,7 @@ def make_worker_result(
         ],
     )
 
-
+#-------------------
 @pytest.mark.asyncio
 async def test_failed_candidate_tests_return_to_manager_and_workers(
     tmp_path: Path,
@@ -153,10 +169,21 @@ async def test_failed_candidate_tests_return_to_manager_and_workers(
     initial_analysis = make_analysis(
         "Initial plan."
     )
-
     revised_analysis = make_analysis(
         "Fix the Docker failure."
     )
+
+    revised_analysis.worker_assignments = [
+        WorkerAssignment(
+            order=1,
+            worker_id="python_solver",
+            task=(
+                "Correct the candidate based "
+                "on the Docker failure."
+            ),
+            depends_on=[],
+        )
+    ]
 
     run = create_run(
         "example",
@@ -264,10 +291,50 @@ async def test_failed_candidate_tests_return_to_manager_and_workers(
         fake_run_reviewer,
     )
 
+    progress_events = []
+
     result = (
-        await run_routes.approve_run_plan(
-            run.id
+        await run_routes.run_approved_plan(
+            run.id,
+            progress_callback=(
+                progress_events.append
+            ),
         )
+    )
+    progress_kinds = [
+        event.kind
+        for event
+        in progress_events
+    ]
+
+    assert (
+        "testing_started"
+        in progress_kinds
+    )
+
+    assert (
+        "testing_failed"
+        in progress_kinds
+    )
+
+    assert (
+        "manager_revision_started"
+        in progress_kinds
+    )
+
+    assert (
+        "manager_revision_completed"
+        in progress_kinds
+    )
+
+    assert (
+        "testing_passed"
+        in progress_kinds
+    )
+
+    assert (
+        "review_approved"
+        in progress_kinds
     )
 
     assert (
@@ -299,6 +366,282 @@ async def test_failed_candidate_tests_return_to_manager_and_workers(
     assert test_replans == 1
     assert reviewer_calls == 1
 
+@pytest.mark.asyncio
+async def test_dependency_setup_failure_does_not_consume_test_round_or_replan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = make_project(
+        tmp_path
+    )
+    analysis = make_analysis(
+        "Initial plan."
+    )
+
+    run = create_run(
+        "example",
+        ProjectSource.GITHUB,
+        github_issue_url=(
+            "https://github.com/example/demo/issues/1"
+        ),
+        github_repository_url=(
+            "https://github.com/example/demo"
+        ),
+        max_review_rounds=1,
+        max_testing_rounds=2,
+    )
+
+    attach_analysis(
+        run.id,
+        analysis,
+    )
+
+    monkeypatch.setattr(
+        run_routes,
+        "load_project",
+        lambda *_args: project,
+    )
+
+    worker_calls = 0
+
+    async def fake_run_assigned_workers(
+        *_args,
+        **_kwargs,
+    ):
+        nonlocal worker_calls
+        worker_calls += 1
+        return make_worker_result(
+            "initial candidate"
+        )
+
+    monkeypatch.setattr(
+        run_routes,
+        "run_assigned_workers",
+        fake_run_assigned_workers,
+    )
+
+    monkeypatch.setattr(
+        run_routes,
+        "run_repository_tests",
+        lambda *_args, **_kwargs: (
+            make_dependency_setup_failure()
+        ),
+    )
+
+    replan_calls = 0
+
+    async def fake_replan_after_test_failure(
+        *_args,
+        **_kwargs,
+    ):
+        nonlocal replan_calls
+        replan_calls += 1
+        return analysis, None
+
+    monkeypatch.setattr(
+        run_routes,
+        "replan_after_test_failure",
+        fake_replan_after_test_failure,
+    )
+
+    progress_events = []
+
+    result = (
+        await run_routes.run_approved_plan(
+            run.id,
+            progress_callback=(
+                progress_events.append
+            ),
+        )
+    )
+
+    assert result.status == RunStatus.FAILED
+    assert result.testing_rounds_completed == 0
+    assert result.candidate_test_result is not None
+    assert (
+        result.candidate_test_result.stage
+        == "dependency_setup"
+    )
+    assert worker_calls == 1
+    assert replan_calls == 0
+
+    progress_messages = [
+        event.message
+        for event in progress_events
+    ]
+
+    assert (
+        "Repository dependency setup failed "
+        "before candidate tests"
+        in progress_messages
+    )
+    assert (
+        "Candidate tests were not run"
+        in progress_messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_failed_candidate_without_remediation_is_not_retested(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = make_project(
+        tmp_path
+    )
+
+    initial_analysis = make_analysis(
+        "Initial plan."
+    )
+
+    unresolved_analysis = IssueAnalysis(
+        summary=(
+            "Solution not found: "
+            "no supported remediation."
+        ),
+        acceptance_criteria=[
+            "Fix the reported behavior."
+        ],
+        ambiguities=[
+            "No supported correction identified."
+        ],
+        repository_instructions=[],
+        likely_files=[
+            "src/example.py",
+            "tests/test_example.py",
+        ],
+        risks=[],
+        feasibility=(
+            Feasibility.NEEDS_CLARIFICATION
+        ),
+        worker_assignments=[],
+        implementation_plan=[],
+    )
+
+    run = create_run(
+        "example",
+        ProjectSource.GITHUB,
+        github_issue_url=(
+            "https://github.com/"
+            "example/demo/issues/1"
+        ),
+        github_repository_url=(
+            "https://github.com/"
+            "example/demo"
+        ),
+        max_review_rounds=1,
+        max_testing_rounds=2,
+    )
+
+    attach_analysis(
+        run.id,
+        initial_analysis,
+    )
+
+    monkeypatch.setattr(
+        run_routes,
+        "load_project",
+        lambda *_args: project,
+    )
+
+    worker_calls = 0
+
+    async def fake_run_assigned_workers(
+        *_args,
+        **_kwargs,
+    ):
+        nonlocal worker_calls
+        worker_calls += 1
+
+        return make_worker_result(
+            "initial candidate"
+        )
+
+    monkeypatch.setattr(
+        run_routes,
+        "run_assigned_workers",
+        fake_run_assigned_workers,
+    )
+
+    test_calls = 0
+
+    def fake_run_repository_tests(
+        *_args,
+        **_kwargs,
+    ) -> RepositoryTestResult:
+        nonlocal test_calls
+        test_calls += 1
+
+        return make_test_result(
+            False
+        )
+
+    monkeypatch.setattr(
+        run_routes,
+        "run_repository_tests",
+        fake_run_repository_tests,
+    )
+
+    async def fake_replan_after_test_failure(
+        *_args,
+        **_kwargs,
+    ):
+        return (
+            unresolved_analysis,
+            None,
+        )
+
+    monkeypatch.setattr(
+        run_routes,
+        "replan_after_test_failure",
+        fake_replan_after_test_failure,
+    )
+
+    progress_events = []
+
+    result = (
+        await run_routes.run_approved_plan(
+            run.id,
+            progress_callback=(
+                progress_events.append
+            ),
+        )
+    )
+
+    assert (
+        result.status
+        == RunStatus.FAILED
+    )
+
+    assert test_calls == 1
+
+    assert worker_calls == 1
+
+    assert (
+        result.testing_rounds_completed
+        == 1
+    )
+
+    assert (
+        result.candidate_test_result
+        is not None
+    )
+
+    assert (
+        result.candidate_test_result.passed
+        is False
+    )
+
+    progress_messages = [
+        event.message
+        for event
+        in progress_events
+    ]
+
+    assert (
+        "No supported test remediation was found"
+        in progress_messages
+    )
 
 @pytest.mark.asyncio
 async def test_reviewer_rejection_replans_retests_and_reviews_again(
