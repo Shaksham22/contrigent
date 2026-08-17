@@ -39,6 +39,8 @@ from contrigent_api.services.run_memory_store import (
     complete_review,
     complete_worker_work,
     create_run,
+    get_agent_invocation_count,
+    get_run,
     get_verified_repository_test_recipe as get_stored_recipe,
     record_candidate_test_result,
     start_review,
@@ -50,6 +52,10 @@ from contrigent_api.services.repository_environment_verifier import (
 )
 from contrigent_api.services.repository_test_runner import (
     RepositoryTestStrategy,
+)
+from contrigent_api.services.contribution_policy_checker import (
+    ContributionPolicyOutcome,
+    ContributionPolicyResult,
 )
 from contrigent_api.services.github_pull_request_creator import (
     GitHubPullRequestResult,
@@ -251,6 +257,22 @@ async def test_repository_preflight_completes_before_manager_analysis(
             "contrigent/test-run",
         ),
     )
+    monkeypatch.setattr(
+        run_routes,
+        "check_contribution_policy",
+        lambda *_args: (
+            call_order.append("policy")
+            or ContributionPolicyResult(
+                outcome=(
+                    ContributionPolicyOutcome
+                    .NO_EXPLICIT_PROHIBITION
+                ),
+                source=None,
+                evidence=None,
+                checked_sources=(),
+            )
+        ),
+    )
 
     async def fake_verify_environment(
         *_args,
@@ -288,7 +310,11 @@ async def test_repository_preflight_completes_before_manager_analysis(
         )
     )
 
-    assert call_order == ["preflight", "manager"]
+    assert call_order == [
+        "policy",
+        "preflight",
+        "manager",
+    ]
     assert get_stored_recipe(result.id) is recipe
 
 
@@ -319,6 +345,19 @@ async def test_baseline_failure_stops_before_manager_analysis(
         lambda *_args, **_kwargs: (
             "main",
             "contrigent/test-run",
+        ),
+    )
+    monkeypatch.setattr(
+        run_routes,
+        "check_contribution_policy",
+        lambda *_args: ContributionPolicyResult(
+            outcome=(
+                ContributionPolicyOutcome
+                .NO_EXPLICIT_PROHIBITION
+            ),
+            source=None,
+            evidence=None,
+            checked_sources=(),
         ),
     )
 
@@ -374,6 +413,255 @@ async def test_baseline_failure_stops_before_manager_analysis(
             )
         )
 
+    assert manager_calls == 0
+    assert rollback_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_blocked_current_upstream_policy_stops_before_preflight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = make_project(tmp_path)
+    project.files["CONTRIBUTING.md"] = (
+        "AI-assisted contributions are welcome."
+    )
+    created_runs = []
+    call_order: list[str] = []
+    preflight_calls = 0
+    manager_calls = 0
+    rollback_calls = 0
+    comment_calls = 0
+    original_create_run = create_run
+
+    def capture_run(*args, **kwargs):
+        run = original_create_run(
+            *args,
+            **kwargs,
+        )
+        created_runs.append(run)
+        return run
+
+    def create_current_upstream_branch(
+        *_args,
+        **_kwargs,
+    ):
+        call_order.append("branch")
+        (tmp_path / "CONTRIBUTING.md").write_text(
+            "Do not use AI or LLM tools to contribute.",
+            encoding="utf-8",
+        )
+        return (
+            "main",
+            "contrigent/test-run",
+        )
+
+    async def fake_verify_environment(
+        *_args,
+        **_kwargs,
+    ):
+        nonlocal preflight_calls
+        preflight_calls += 1
+        return make_verified_recipe()
+
+    async def fake_analyze_project(
+        *_args,
+        **_kwargs,
+    ):
+        nonlocal manager_calls
+        manager_calls += 1
+        return make_analysis("Must not run."), None
+
+    def fake_rollback(*_args, **_kwargs) -> None:
+        nonlocal rollback_calls
+        rollback_calls += 1
+        call_order.append("rollback")
+
+    def fake_comment(
+        _issue_url: str,
+        _body: str,
+    ) -> None:
+        nonlocal comment_calls
+        comment_calls += 1
+
+    monkeypatch.setattr(
+        run_routes,
+        "get_or_download_github_project",
+        lambda *_args: SimpleNamespace(
+            project_name="example"
+        ),
+    )
+    monkeypatch.setattr(
+        run_routes,
+        "load_downloaded_github_project",
+        lambda *_args: project,
+    )
+    monkeypatch.setattr(
+        run_routes,
+        "create_run",
+        capture_run,
+    )
+    monkeypatch.setattr(
+        run_routes,
+        "create_run_branch",
+        create_current_upstream_branch,
+    )
+    monkeypatch.setattr(
+        run_routes,
+        "verify_repository_environment",
+        fake_verify_environment,
+    )
+    monkeypatch.setattr(
+        run_routes,
+        "analyze_project",
+        fake_analyze_project,
+    )
+    monkeypatch.setattr(
+        run_routes,
+        "rollback_run_branch",
+        fake_rollback,
+    )
+    monkeypatch.setattr(
+        github_issue_commenter,
+        "create_issue_comment",
+        fake_comment,
+    )
+
+    with pytest.raises(
+        run_routes.HTTPException,
+        match="Contribution blocked",
+    ) as error_info:
+        await run_routes.start_run(
+            run_routes.CreateRunRequest(
+                github_issue_url=(
+                    "https://github.com/example/project/issues/7"
+                ),
+                github_repository_url=(
+                    "https://github.com/example/project"
+                ),
+            )
+        )
+
+    run = created_runs[0]
+    assert error_info.value.status_code == 409
+    assert preflight_calls == 0
+    assert manager_calls == 0
+    assert rollback_calls == 1
+    assert comment_calls == 0
+    assert call_order == [
+        "branch",
+        "rollback",
+    ]
+    assert get_run(run.id).status == RunStatus.FAILED
+    assert get_agent_invocation_count(
+        run.id,
+        "issue_analyzer",
+    ) == 0
+    assert get_agent_invocation_count(
+        run.id,
+        "repository_setup_specialist",
+    ) == 0
+    assert run.worker_results == {}
+    assert run.reviewer_result is None
+    assert run.draft_pr_created is False
+
+
+@pytest.mark.asyncio
+async def test_inconclusive_policy_stops_before_preflight_and_manager(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = make_project(tmp_path)
+    preflight_calls = 0
+    manager_calls = 0
+    rollback_calls = 0
+
+    monkeypatch.setattr(
+        run_routes,
+        "get_or_download_github_project",
+        lambda *_args: SimpleNamespace(
+            project_name="example"
+        ),
+    )
+    monkeypatch.setattr(
+        run_routes,
+        "load_downloaded_github_project",
+        lambda *_args: project,
+    )
+    monkeypatch.setattr(
+        run_routes,
+        "create_run_branch",
+        lambda *_args, **_kwargs: (
+            "main",
+            "contrigent/test-run",
+        ),
+    )
+    monkeypatch.setattr(
+        run_routes,
+        "check_contribution_policy",
+        lambda *_args: ContributionPolicyResult(
+            outcome=ContributionPolicyOutcome.INCONCLUSIVE,
+            source="CONTRIBUTING.md",
+            evidence="The policy page could not be retrieved safely.",
+            checked_sources=("CONTRIBUTING.md",),
+            policy_url=(
+                "https://docs.example.org/contributing"
+            ),
+        ),
+    )
+
+    async def fake_verify_environment(
+        *_args,
+        **_kwargs,
+    ):
+        nonlocal preflight_calls
+        preflight_calls += 1
+        return make_verified_recipe()
+
+    async def fake_analyze_project(
+        *_args,
+        **_kwargs,
+    ):
+        nonlocal manager_calls
+        manager_calls += 1
+        return make_analysis("Must not run."), None
+
+    def fake_rollback(*_args, **_kwargs) -> None:
+        nonlocal rollback_calls
+        rollback_calls += 1
+
+    monkeypatch.setattr(
+        run_routes,
+        "verify_repository_environment",
+        fake_verify_environment,
+    )
+    monkeypatch.setattr(
+        run_routes,
+        "analyze_project",
+        fake_analyze_project,
+    )
+    monkeypatch.setattr(
+        run_routes,
+        "rollback_run_branch",
+        fake_rollback,
+    )
+
+    with pytest.raises(
+        run_routes.HTTPException,
+        match="could not be verified",
+    ):
+        await run_routes.start_run(
+            run_routes.CreateRunRequest(
+                github_issue_url=(
+                    "https://github.com/example/project/issues/7"
+                ),
+                github_repository_url=(
+                    "https://github.com/example/project"
+                ),
+            )
+        )
+
+    assert preflight_calls == 0
     assert manager_calls == 0
     assert rollback_calls == 1
 

@@ -19,6 +19,11 @@ from contrigent_api.services.repository_environment_verifier import (
     verify_repository_environment,
     verify_repository_revision,
 )
+from contrigent_api.services.contribution_policy_checker import (
+    ContributionPolicyOutcome,
+    build_policy_stop_message,
+    check_contribution_policy,
+)
 
 from contrigent_api.services.approved_file_applier import (
     apply_approved_files,
@@ -249,6 +254,73 @@ async def start_run(
 
             run.run_branch = (
                 run_branch
+            )
+
+            report_run_progress(
+                progress_callback,
+                "policy_check_started",
+                "Checking contribution policy",
+            )
+            policy_result = (
+                check_contribution_policy(
+                    repository_path,
+                    run.github_repository_url,
+                )
+            )
+
+            if (
+                policy_result.outcome
+                != ContributionPolicyOutcome
+                .NO_EXPLICIT_PROHIBITION
+            ):
+                progress_kind = (
+                    "policy_check_blocked"
+                    if policy_result.outcome
+                    == ContributionPolicyOutcome.BLOCKED
+                    else "policy_check_inconclusive"
+                )
+                progress_message = (
+                    "Contribution blocked by repository policy"
+                    if policy_result.outcome
+                    == ContributionPolicyOutcome.BLOCKED
+                    else "Contribution policy could not be verified"
+                )
+                progress_details = [
+                    f"Source: {policy_result.source}",
+                ]
+
+                if policy_result.policy_url is not None:
+                    progress_details.append(
+                        "Policy URL: "
+                        f"{policy_result.policy_url}"
+                    )
+
+                if policy_result.evidence is not None:
+                    progress_details.append(
+                        "Evidence: "
+                        f"{policy_result.evidence}"
+                    )
+
+                report_run_progress(
+                    progress_callback,
+                    progress_kind,
+                    progress_message,
+                    tuple(progress_details),
+                )
+                raise HTTPException(
+                    status_code=409,
+                    detail=build_policy_stop_message(
+                        policy_result
+                    ),
+                )
+
+            report_run_progress(
+                progress_callback,
+                "policy_check_passed",
+                (
+                    "No explicit incompatible contribution "
+                    "policy was found"
+                ),
             )
 
             verified_recipe = (

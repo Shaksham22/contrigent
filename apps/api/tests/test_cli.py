@@ -560,6 +560,17 @@ def test_repository_preflight_progress_is_displayed(
     capsys,
 ) -> None:
     messages = (
+        (
+            "policy_check_started",
+            "Checking contribution policy",
+        ),
+        (
+            "policy_check_passed",
+            (
+                "No explicit incompatible contribution "
+                "policy was found"
+            ),
+        ),
         ("preflight_started", "Repository preflight"),
         (
             "preflight_detecting",

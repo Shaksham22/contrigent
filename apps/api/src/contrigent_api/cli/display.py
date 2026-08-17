@@ -264,6 +264,10 @@ def show_run_progress(
         return
 
     symbols = {
+        "policy_check_started": "→",
+        "policy_check_passed": "✓",
+        "policy_check_blocked": "✗",
+        "policy_check_inconclusive": "✗",
         "preflight_started": "→",
         "preflight_detecting": "→",
         "preflight_verifying": "→",
