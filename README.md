@@ -10,35 +10,11 @@ The project is an experiment in using multiple specialized AI agents as a small 
 
 ## What Contrigent Does
 
-The intended workflow is:
+The intended workflow is shown below:
 
-```text
-GitHub Repository + Issue
-          ↓
-Repository Setup / Test Environment
-          ↓
-Manager analyzes the issue
-          ↓
-Human approves the plan
-          ↓
-Specialist agents implement the solution
-          ↓
-Testing specialist designs regression / edge-case tests
-          ↓
-Docker executes the verified test suite
-          ↓
-Failure → Manager replans with full failure context
-          ↓
-Passing candidate
-          ↓
-Independent Reviewer
-          ↓
-Human final approval
-          ↓
-Final tests
-          ↓
-Commit → Push to Fork → Draft Pull Request
-```
+<p align="center">
+  <img src="docs/assets/contrigent-workflow.png" alt="Contrigent workflow from CLI input through repository setup, Manager delegation, specialist implementation, testing, independent review, draft pull request creation, and an issue comment" width="900">
+</p>
 
 Contrigent keeps the **reasoning work** and the **verification work** separate: AI agents can decide what should be changed, but actual pass/fail results come from running the repository's tests.
 
