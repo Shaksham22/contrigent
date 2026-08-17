@@ -406,6 +406,13 @@ def start_review(
 
     if (
         run.project_source == ProjectSource.GITHUB
+        and run.analysis is not None
+        and any(
+            assignment.worker_id
+            != "documentation_specialist"
+            for assignment
+            in run.analysis.worker_assignments
+        )
         and (
             run.candidate_test_result is None
             or not run.candidate_test_result.passed
@@ -571,14 +578,38 @@ def complete_repository_tests(
 
 def start_commit(
     run_id: UUID,
+    *,
+    repository_tests_required: bool = True,
 ) -> Run:
     run = get_run(run_id)
 
-    if run.status != RunStatus.TESTS_PASSED:
+    expected_status = (
+        RunStatus.TESTS_PASSED
+        if repository_tests_required
+        else RunStatus.CHANGES_APPLIED
+    )
+
+    if run.status != expected_status:
         raise InvalidRunTransitionError(
-            "A commit can only be created "
-            "after repository tests pass."
+            "A commit can only be created after the "
+            "required validation is complete."
         )
+
+    if not repository_tests_required:
+        if (
+            run.analysis is None
+            or not run.analysis.worker_assignments
+            or any(
+                assignment.worker_id
+                != "documentation_specialist"
+                for assignment
+                in run.analysis.worker_assignments
+            )
+        ):
+            raise InvalidRunTransitionError(
+                "Repository tests may only be skipped for "
+                "documentation-only work."
+            )
 
     run.status = RunStatus.COMMITTING
 

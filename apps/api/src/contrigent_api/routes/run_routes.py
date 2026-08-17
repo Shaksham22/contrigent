@@ -19,11 +19,6 @@ from contrigent_api.services.repository_environment_verifier import (
     verify_repository_environment,
     verify_repository_revision,
 )
-from contrigent_api.services.contribution_policy_checker import (
-    ContributionPolicyOutcome,
-    build_policy_stop_message,
-    check_contribution_policy,
-)
 
 from contrigent_api.services.approved_file_applier import (
     apply_approved_files,
@@ -65,6 +60,7 @@ from contrigent_api.models.worker_result import (
 )
 from contrigent_api.agents.issue_analyzer.output_schema import (
     Feasibility,
+    IssueAnalysis,
 )
 from contrigent_api.services.issue_analysis_runner import (
     analyze_project,
@@ -123,6 +119,19 @@ def candidate_file_contents(
         for replacement
         in proposed_files
     }
+
+
+DOCUMENTATION_WORKER_ID = "documentation_specialist"
+
+
+def analysis_requires_repository_execution(
+    analysis: IssueAnalysis,
+) -> bool:
+    return any(
+        assignment.worker_id
+        != DOCUMENTATION_WORKER_ID
+        for assignment in analysis.worker_assignments
+    )
 
 router = APIRouter(
     prefix="/runs",
@@ -256,87 +265,6 @@ async def start_run(
                 run_branch
             )
 
-            report_run_progress(
-                progress_callback,
-                "policy_check_started",
-                "Checking contribution policy",
-            )
-            policy_result = (
-                check_contribution_policy(
-                    repository_path,
-                    run.github_repository_url,
-                )
-            )
-
-            if (
-                policy_result.outcome
-                != ContributionPolicyOutcome
-                .NO_EXPLICIT_PROHIBITION
-            ):
-                progress_kind = (
-                    "policy_check_blocked"
-                    if policy_result.outcome
-                    == ContributionPolicyOutcome.BLOCKED
-                    else "policy_check_inconclusive"
-                )
-                progress_message = (
-                    "Contribution blocked by repository policy"
-                    if policy_result.outcome
-                    == ContributionPolicyOutcome.BLOCKED
-                    else "Contribution policy could not be verified"
-                )
-                progress_details = [
-                    f"Source: {policy_result.source}",
-                ]
-
-                if policy_result.policy_url is not None:
-                    progress_details.append(
-                        "Policy URL: "
-                        f"{policy_result.policy_url}"
-                    )
-
-                if policy_result.evidence is not None:
-                    progress_details.append(
-                        "Evidence: "
-                        f"{policy_result.evidence}"
-                    )
-
-                report_run_progress(
-                    progress_callback,
-                    progress_kind,
-                    progress_message,
-                    tuple(progress_details),
-                )
-                raise HTTPException(
-                    status_code=409,
-                    detail=build_policy_stop_message(
-                        policy_result
-                    ),
-                )
-
-            report_run_progress(
-                progress_callback,
-                "policy_check_passed",
-                (
-                    "No explicit incompatible contribution "
-                    "policy was found"
-                ),
-            )
-
-            verified_recipe = (
-                await verify_repository_environment(
-                    project,
-                    progress_callback=(
-                        progress_callback
-                    ),
-                    run_id=run.id,
-                )
-            )
-            store_verified_repository_test_recipe(
-                run.id,
-                verified_recipe,
-            )
-
         report_run_progress(
             progress_callback,
             "analysis_started",
@@ -348,6 +276,31 @@ async def start_run(
                 run_id=run.id,
             )
         )
+
+        if (
+            project.project_source
+            == ProjectSource.GITHUB
+            and analysis.feasibility
+            == Feasibility.FEASIBLE
+            and analysis.worker_assignments
+            and analysis_requires_repository_execution(
+                analysis
+            )
+        ):
+            verified_recipe = (
+                await verify_repository_environment(
+                    project,
+                    analysis=analysis,
+                    progress_callback=(
+                        progress_callback
+                    ),
+                    run_id=run.id,
+                )
+            )
+            store_verified_repository_test_recipe(
+                run.id,
+                verified_recipe,
+            )
 
         run = attach_analysis(
             run.id,
@@ -422,10 +375,15 @@ async def run_approved_plan(
 
         verified_recipe = None
 
-        if (
+        repository_execution_required = (
             project.project_source
             == ProjectSource.GITHUB
-        ):
+            and analysis_requires_repository_execution(
+                run.analysis
+            )
+        )
+
+        if repository_execution_required:
             verified_recipe = (
                 get_verified_repository_test_recipe(
                     run_id
@@ -459,10 +417,7 @@ async def run_approved_plan(
             # Real GitHub candidates must pass
             # deterministic Docker validation before
             # they are allowed to reach the Reviewer.
-            if (
-                project.project_source
-                == ProjectSource.GITHUB
-            ):
+            if repository_execution_required:
                 while True:
                     testing_round = (
                         run.testing_rounds_completed
@@ -1161,15 +1116,24 @@ def approve_run_final_changes(
             run_branch,
         )
 
-        verified_recipe = (
-            get_verified_repository_test_recipe(
-                run.id
+        repository_execution_required = (
+            run.analysis is not None
+            and analysis_requires_repository_execution(
+                run.analysis
             )
         )
-        verify_repository_revision(
-            repository_path,
-            verified_recipe,
-        )
+        verified_recipe = None
+
+        if repository_execution_required:
+            verified_recipe = (
+                get_verified_repository_test_recipe(
+                    run.id
+                )
+            )
+            verify_repository_revision(
+                repository_path,
+                verified_recipe,
+            )
 
         original_branch = (
             run.original_branch
@@ -1215,24 +1179,24 @@ def approve_run_final_changes(
             applied_files=applied_files,
         )
 
-        run = start_repository_tests(
-            run.id
-        )
-        test_result = execute_repository_test_strategy(
-            repository_path,
-            verified_recipe.strategy,
-            protect_repository_files=True,
-        )
+        if verified_recipe is not None:
+            run = start_repository_tests(
+                run.id
+            )
+            test_result = execute_repository_test_strategy(
+                repository_path,
+                verified_recipe.strategy,
+            )
 
-        run = complete_repository_tests(
-            run.id,
-            test_result,
-        )
+            run = complete_repository_tests(
+                run.id,
+                test_result,
+            )
 
-        # Failed tests are a normal gated outcome.
-        # Never commit or push them.
-        if not test_result.passed:
-            return run
+            # Failed tests are a normal gated outcome.
+            # Never commit or push them.
+            if not test_result.passed:
+                return run
 
         issue_location = (
             parse_github_issue_url(
@@ -1247,7 +1211,10 @@ def approve_run_final_changes(
         )
 
         run = start_commit(
-            run.id
+            run.id,
+            repository_tests_required=(
+                verified_recipe is not None
+            ),
         )
 
         commit_sha = create_approved_commit(

@@ -1,13 +1,15 @@
 from pathlib import Path
-import hashlib
+from enum import Enum
+import json
 import re
 import shlex
 import subprocess
 import tempfile
 import time
 import tomllib
+from uuid import uuid4
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from contrigent_api.models.repository_test_result import (
     RepositoryTestResult,
@@ -23,6 +25,10 @@ from contrigent_api.services.docker_runtime_manager import (
     DockerRuntimeSession,
     start_docker_runtime_if_needed,
     stop_docker_runtime_if_started,
+)
+from contrigent_api.services.repository_ecosystems import (
+    NODE_ECOSYSTEM,
+    PYTHON_ECOSYSTEM,
 )
 
 
@@ -45,10 +51,7 @@ REQUIRES_PYTHON_LOWER_PATTERN = re.compile(
 REQUIRES_PYTHON_UPPER_PATTERN = re.compile(
     r"<\s*(3\.\d+)"
 )
-DOCKER_IMAGE = (
-    "ghcr.io/astral-sh/uv:"
-    "python3.12-bookworm-slim"
-)
+DOCKER_IMAGE = PYTHON_ECOSYSTEM.default_docker_image
 ProgressCallback = Callable[
     [int, str],
     None,
@@ -56,6 +59,18 @@ ProgressCallback = Callable[
 
 DEPENDENCY_SETUP_TIMEOUT_SECONDS = 300
 TEST_TIMEOUT_SECONDS = 300
+SERVICE_COMMAND_TIMEOUT_SECONDS = 30
+SERVICE_READINESS_POLL_INTERVAL_SECONDS = 0.5
+PRE_TEST_FAILURE_EXIT_CODE = 197
+FORBIDDEN_CONTAINER_ENVIRONMENT_NAMES = {
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "DOCKER_HOST",
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "OPENAI_API_KEY",
+    "SSH_AUTH_SOCK",
+}
 
 SUPPORTED_TEST_RUNNERS = (
     "nox",
@@ -90,41 +105,6 @@ WORKFLOW_KEY_PATTERN = re.compile(
     r"^([A-Za-z0-9_.-]+)\s*:\s*$"
 )
 
-REPOSITORY_SNAPSHOT_IGNORED_FOLDERS = {
-    ".git",
-    ".mypy_cache",
-    ".nox",
-    ".pytest_cache",
-    ".ruff_cache",
-    ".tox",
-    ".venv",
-    "__pycache__",
-    "build",
-    "dist",
-    "node_modules",
-}
-
-PROTECTED_GENERATED_FILE_NAMES = {
-    "Pipfile.lock",
-    "package-lock.json",
-    "pnpm-lock.yaml",
-    "poetry.lock",
-    "pyproject.toml",
-    "uv.lock",
-    "yarn.lock",
-}
-
-PROTECTED_NEW_FILE_SUFFIXES = {
-    ".cfg",
-    ".ini",
-    ".json",
-    ".py",
-    ".toml",
-    ".yaml",
-    ".yml",
-}
-
-
 @dataclass(frozen=True)
 class RepositoryCommandSelection:
     dependency_setup_commands: tuple[
@@ -135,17 +115,117 @@ class RepositoryCommandSelection:
     evidence: tuple[str, ...]
 
 
+class RepositoryTestNetworkMode(str, Enum):
+    NONE = "none"
+    SERVICES_ONLY = "services_only"
+    INTERNET = "internet"
+
+
 @dataclass(frozen=True)
-class RepositoryTestStrategy:
-    python_version: str
-    dependency_setup_commands: tuple[str, ...]
-    test_command: str
+class RepositoryService:
+    name: str
+    image: str
+    command: tuple[str, ...] = ()
+    environment_variables: dict[str, str] = field(
+        default_factory=dict
+    )
+    network_alias: str = "service"
+    readiness_command: tuple[str, ...] = ()
+    startup_timeout_seconds: int = 30
+
+
+@dataclass(frozen=True)
+class RepositoryExecutionStrategy:
+    ecosystem: str
+    runtime_version: str | None
+    project_root: str
+    docker_image: str
+    setup_commands: tuple[tuple[str, ...], ...]
+    background_commands: tuple[tuple[str, ...], ...]
+    pre_test_commands: tuple[tuple[str, ...], ...]
+    test_commands: tuple[tuple[str, ...], ...]
+    environment_variables: dict[str, str]
+    test_network_mode: RepositoryTestNetworkMode
+    services: tuple[RepositoryService, ...]
     evidence: tuple[str, ...]
-    test_virtual_env: str | None = None
+
+    @property
+    def python_version(self) -> str:
+        if (
+            self.ecosystem != "python"
+            or self.runtime_version is None
+        ):
+            raise AttributeError(
+                "This strategy does not select a Python runtime."
+            )
+
+        return self.runtime_version
+
+    @property
+    def dependency_setup_commands(self) -> tuple[str, ...]:
+        return tuple(
+            render_repository_command(command)
+            for command in self.setup_commands
+        )
+
+    @property
+    def test_command(self) -> str:
+        return render_repository_command(
+            self.test_commands[0]
+        )
+
+    @property
+    def test_virtual_env(self) -> str | None:
+        return self.environment_variables.get(
+            "VIRTUAL_ENV"
+        )
+
+
+RepositoryTestStrategy = RepositoryExecutionStrategy
 
 
 class RepositoryTestRunnerError(RuntimeError):
     pass
+
+
+class RepositoryServiceStartupError(
+    RepositoryTestRunnerError
+):
+    def __init__(
+        self,
+        message: str,
+        *,
+        command: list[str],
+        exit_code: int | None,
+        timed_out: bool,
+        stdout: str,
+        stderr: str,
+    ) -> None:
+        super().__init__(message)
+        self.command = command
+        self.exit_code = exit_code
+        self.timed_out = timed_out
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def structured_shell_command(
+    command: str,
+) -> tuple[str, ...]:
+    return ("sh", "-lc", command)
+
+
+def render_repository_command(
+    command: tuple[str, ...] | list[str],
+) -> str:
+    if (
+        len(command) == 3
+        and command[0] in {"sh", "bash"}
+        and command[1] == "-lc"
+    ):
+        return command[2]
+
+    return shlex.join(command)
 
 
 def trim_command_output(
@@ -177,7 +257,7 @@ def convert_timeout_output(
 
 def run_docker_command(
     command: list[str],
-    timeout_seconds: int,
+    timeout_seconds: float,
 ) -> tuple[
     int | None,
     str,
@@ -235,6 +315,11 @@ def build_docker_command(
     inner_command: list[str],
     *,
     disable_network: bool,
+    docker_image: str = DOCKER_IMAGE,
+    environment_variables: (
+        dict[str, str] | None
+    ) = None,
+    network_name: str | None = None,
 ) -> list[str]:
     command = [
         "docker",
@@ -288,7 +373,27 @@ def build_docker_command(
         "/workspace",
     ]
 
-    if disable_network:
+    for name, value in sorted(
+        (environment_variables or {}).items()
+    ):
+        if (
+            name.upper()
+            in FORBIDDEN_CONTAINER_ENVIRONMENT_NAMES
+        ):
+            raise RepositoryTestRunnerError(
+                "Repository execution cannot receive host or "
+                "publication credentials."
+            )
+
+        command.extend(
+            ["--env", f"{name}={value}"]
+        )
+
+    if network_name is not None:
+        command.extend(
+            ["--network", network_name]
+        )
+    elif disable_network:
         command.extend(
             [
                 "--network",
@@ -298,12 +403,254 @@ def build_docker_command(
 
     command.extend(
         [
-            DOCKER_IMAGE,
+            docker_image,
             *inner_command,
         ]
     )
 
     return command
+
+
+def build_service_container_command(
+    service: RepositoryService,
+    *,
+    container_name: str,
+    network_name: str,
+) -> list[str]:
+    if not service.image or service.image.startswith("-"):
+        raise RepositoryTestRunnerError(
+            "Repository service image is invalid."
+        )
+
+    command = [
+        "docker",
+        "run",
+        "--detach",
+        "--name",
+        container_name,
+        "--security-opt",
+        "no-new-privileges:true",
+        "--memory",
+        "512m",
+        "--cpus",
+        "0.5",
+        "--pids-limit",
+        "128",
+        "--network",
+        network_name,
+        "--network-alias",
+        service.network_alias,
+    ]
+
+    for name, value in sorted(
+        service.environment_variables.items()
+    ):
+        if (
+            name.upper()
+            in FORBIDDEN_CONTAINER_ENVIRONMENT_NAMES
+        ):
+            raise RepositoryTestRunnerError(
+                "Repository services cannot receive host or "
+                "publication credentials."
+            )
+
+        command.extend(
+            ["--env", f"{name}={value}"]
+        )
+
+    command.append(service.image)
+    command.extend(service.command)
+    return command
+
+
+def raise_service_startup_error(
+    message: str,
+    command: list[str],
+    result: tuple[int | None, str, str, bool],
+) -> None:
+    exit_code, stdout, stderr, timed_out = result
+    raise RepositoryServiceStartupError(
+        message,
+        command=command,
+        exit_code=exit_code,
+        timed_out=timed_out,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+
+def create_repository_test_network(
+    *,
+    internal: bool,
+) -> str:
+    network_name = (
+        "contrigent-test-"
+        + uuid4().hex[:16]
+    )
+    command = ["docker", "network", "create"]
+
+    if internal:
+        command.append("--internal")
+
+    command.append(network_name)
+    result = run_docker_command(
+        command,
+        SERVICE_COMMAND_TIMEOUT_SECONDS,
+    )
+
+    if result[3] or result[0] != 0:
+        raise_service_startup_error(
+            "Disposable test network could not be created.",
+            command,
+            result,
+        )
+
+    return network_name
+
+
+def start_repository_service(
+    service: RepositoryService,
+    *,
+    network_name: str,
+) -> str:
+    container_name = (
+        "contrigent-service-"
+        + uuid4().hex[:16]
+    )
+    start_command = build_service_container_command(
+        service,
+        container_name=container_name,
+        network_name=network_name,
+    )
+    start_result = run_docker_command(
+        start_command,
+        service.startup_timeout_seconds,
+    )
+
+    if start_result[3] or start_result[0] != 0:
+        raise_service_startup_error(
+            f"Disposable service '{service.name}' failed to start.",
+            start_command,
+            start_result,
+        )
+
+    readiness_deadline = (
+        time.monotonic()
+        + service.startup_timeout_seconds
+    )
+    readiness_command = [
+        "docker",
+        "exec",
+        container_name,
+        *service.readiness_command,
+    ]
+    last_readiness_result: tuple[
+        int | None,
+        str,
+        str,
+        bool,
+    ] = (1, "", "Service did not become ready.", False)
+
+    while True:
+        remaining_seconds = (
+            readiness_deadline - time.monotonic()
+        )
+
+        if remaining_seconds <= 0:
+            cleanup_repository_services(
+                [container_name],
+                None,
+            )
+            raise_service_startup_error(
+                f"Disposable service '{service.name}' readiness timed out.",
+                readiness_command,
+                (
+                    last_readiness_result[0],
+                    last_readiness_result[1],
+                    last_readiness_result[2],
+                    True,
+                ),
+            )
+
+        running_command = [
+            "docker",
+            "inspect",
+            "--format",
+            "{{.State.Running}}",
+            container_name,
+        ]
+        running_result = run_docker_command(
+            running_command,
+            remaining_seconds,
+        )
+
+        if (
+            running_result[3]
+            or running_result[0] != 0
+            or running_result[1].strip().lower()
+            != "true"
+        ):
+            cleanup_repository_services(
+                [container_name],
+                None,
+            )
+            raise_service_startup_error(
+                f"Disposable service '{service.name}' stopped before readiness.",
+                running_command,
+                running_result,
+            )
+
+        if not service.readiness_command:
+            return container_name
+
+        remaining_seconds = (
+            readiness_deadline - time.monotonic()
+        )
+
+        if remaining_seconds <= 0:
+            continue
+
+        last_readiness_result = run_docker_command(
+            readiness_command,
+            remaining_seconds,
+        )
+
+        if (
+            not last_readiness_result[3]
+            and last_readiness_result[0] == 0
+        ):
+            return container_name
+
+        remaining_seconds = (
+            readiness_deadline - time.monotonic()
+        )
+
+        if remaining_seconds <= 0:
+            continue
+
+        time.sleep(
+            min(
+                SERVICE_READINESS_POLL_INTERVAL_SECONDS,
+                remaining_seconds,
+            )
+        )
+
+
+def cleanup_repository_services(
+    container_names: list[str],
+    network_name: str | None,
+) -> None:
+    for container_name in reversed(container_names):
+        run_docker_command(
+            ["docker", "rm", "--force", container_name],
+            SERVICE_COMMAND_TIMEOUT_SECONDS,
+        )
+
+    if network_name is not None:
+        run_docker_command(
+            ["docker", "network", "rm", network_name],
+            SERVICE_COMMAND_TIMEOUT_SECONDS,
+        )
 
 def report_progress(
     progress_callback: ProgressCallback | None,
@@ -1825,100 +2172,6 @@ def build_test_environment_command(
     )
 
 
-def repository_snapshot_ignores_path(
-    relative_path: Path,
-) -> bool:
-    return any(
-        part in REPOSITORY_SNAPSHOT_IGNORED_FOLDERS
-        or part.endswith(".egg-info")
-        for part in relative_path.parts
-    )
-
-
-def hash_file_contents(
-    file_path: Path,
-) -> str:
-    digest = hashlib.sha256()
-
-    with file_path.open("rb") as file:
-        while chunk := file.read(
-            1024 * 1024
-        ):
-            digest.update(chunk)
-
-    return digest.hexdigest()
-
-
-def snapshot_repository_files(
-    repository_path: Path,
-) -> dict[str, str]:
-    repository_root = repository_path.resolve()
-    snapshot: dict[str, str] = {}
-
-    for file_path in sorted(
-        repository_root.rglob("*")
-    ):
-        if (
-            not file_path.is_file()
-            or file_path.is_symlink()
-        ):
-            continue
-
-        relative_path = file_path.relative_to(
-            repository_root
-        )
-
-        if repository_snapshot_ignores_path(
-            relative_path
-        ):
-            continue
-
-        snapshot[
-            relative_path.as_posix()
-        ] = hash_file_contents(
-            file_path
-        )
-
-    return snapshot
-
-
-def is_protected_new_repository_file(
-    relative_path: str,
-) -> bool:
-    path = Path(relative_path)
-
-    return (
-        path.name in PROTECTED_GENERATED_FILE_NAMES
-        or path.name.startswith("requirements")
-        or path.suffix.lower()
-        in PROTECTED_NEW_FILE_SUFFIXES
-    )
-
-
-def find_repository_setup_mutations(
-    before: dict[str, str],
-    repository_path: Path,
-) -> list[str]:
-    after = snapshot_repository_files(
-        repository_path
-    )
-    mutations = {
-        path
-        for path, digest in before.items()
-        if after.get(path) != digest
-    }
-
-    mutations.update(
-        path
-        for path in after.keys() - before.keys()
-        if is_protected_new_repository_file(
-            path
-        )
-    )
-
-    return sorted(mutations)
-
-
 def describe_dependency_setup_evidence(
     repository_path: Path,
     pyproject_data: dict,
@@ -1958,10 +2211,12 @@ def describe_dependency_setup_evidence(
     return "Python packaging metadata"
 
 
-def build_repository_test_strategy(
+def build_python_repository_execution_strategy(
     repository_path: Path,
     issue_text: str | None = None,
-) -> RepositoryTestStrategy:
+    *,
+    project_root: str = ".",
+) -> RepositoryExecutionStrategy:
     pyproject_data = read_pyproject_data(
         repository_path
     )
@@ -2024,12 +2279,29 @@ def build_repository_test_strategy(
                 )
             )
 
-        return RepositoryTestStrategy(
-            python_version=python_version,
-            dependency_setup_commands=tuple(
-                dependency_setup_commands
+        return RepositoryExecutionStrategy(
+            ecosystem=PYTHON_ECOSYSTEM.name,
+            runtime_version=python_version,
+            project_root=project_root,
+            docker_image=(
+                PYTHON_ECOSYSTEM.docker_image_for_runtime(
+                    python_version
+                )
             ),
-            test_command=native_test_command,
+            setup_commands=tuple(
+                structured_shell_command(command)
+                for command in dependency_setup_commands
+            ),
+            background_commands=(),
+            pre_test_commands=(),
+            test_commands=(
+                structured_shell_command(
+                    native_test_command
+                ),
+            ),
+            environment_variables={},
+            test_network_mode=RepositoryTestNetworkMode.NONE,
+            services=(),
             evidence=evidence,
         )
 
@@ -2052,12 +2324,30 @@ def build_repository_test_strategy(
             python_version,
         )
 
-        return RepositoryTestStrategy(
-            python_version=python_version,
-            dependency_setup_commands=(
-                dependency_setup,
+        return RepositoryExecutionStrategy(
+            ecosystem=PYTHON_ECOSYSTEM.name,
+            runtime_version=python_version,
+            project_root=project_root,
+            docker_image=(
+                PYTHON_ECOSYSTEM.docker_image_for_runtime(
+                    python_version
+                )
             ),
-            test_command=native_test_command,
+            setup_commands=(
+                structured_shell_command(
+                    dependency_setup
+                ),
+            ),
+            background_commands=(),
+            pre_test_commands=(),
+            test_commands=(
+                structured_shell_command(
+                    native_test_command
+                ),
+            ),
+            environment_variables={},
+            test_network_mode=RepositoryTestNetworkMode.NONE,
+            services=(),
             evidence=(
                 *evidence,
                 (
@@ -2077,20 +2367,279 @@ def build_repository_test_strategy(
         python_version,
     )
 
-    return RepositoryTestStrategy(
-        python_version=python_version,
-        dependency_setup_commands=(
-            dependency_setup,
+    return RepositoryExecutionStrategy(
+        ecosystem=PYTHON_ECOSYSTEM.name,
+        runtime_version=python_version,
+        project_root=project_root,
+        docker_image=(
+            PYTHON_ECOSYSTEM.docker_image_for_runtime(
+                python_version
+            )
         ),
-        test_command=build_pytest_test_command(
-            test_command_tokens,
-            test_python,
+        setup_commands=(
+            structured_shell_command(
+                dependency_setup
+            ),
         ),
+        background_commands=(),
+        pre_test_commands=(),
+        test_commands=(
+            structured_shell_command(
+                build_pytest_test_command(
+                    test_command_tokens,
+                    test_python,
+                )
+            ),
+        ),
+        environment_variables={
+            "VIRTUAL_ENV": test_virtual_env,
+        },
+        test_network_mode=RepositoryTestNetworkMode.NONE,
+        services=(),
         evidence=(
             *evidence,
             f"Dependency setup: {setup_evidence}",
         ),
-        test_virtual_env=test_virtual_env,
+    )
+
+
+def read_node_package_data(
+    project_path: Path,
+) -> dict:
+    package_path = project_path / "package.json"
+
+    if not package_path.is_file():
+        raise RepositoryTestRunnerError(
+            "Node repository has no package.json."
+        )
+
+    try:
+        data = json.loads(
+            package_path.read_text(encoding="utf-8")
+        )
+    except json.JSONDecodeError as error:
+        raise RepositoryTestRunnerError(
+            "Repository package.json is invalid."
+        ) from error
+
+    if not isinstance(data, dict):
+        raise RepositoryTestRunnerError(
+            "Repository package.json must contain an object."
+        )
+
+    return data
+
+
+def select_node_runtime_version(
+    project_path: Path,
+) -> tuple[str, str]:
+    for file_name in (".nvmrc", ".node-version"):
+        version_path = project_path / file_name
+
+        if not version_path.is_file():
+            continue
+
+        version = version_path.read_text(
+            encoding="utf-8"
+        ).strip().removeprefix("v")
+
+        if re.fullmatch(r"\d+(?:\.\d+){0,2}", version):
+            return version, file_name
+
+    return (
+        NODE_ECOSYSTEM.default_runtime_version or "22",
+        "Contrigent Node default",
+    )
+
+
+def detect_node_package_manager(
+    project_path: Path,
+    package_data: dict,
+) -> tuple[str, tuple[str, ...], str]:
+    configured_manager = package_data.get("packageManager")
+
+    if isinstance(configured_manager, str):
+        manager = configured_manager.split("@", 1)[0]
+    elif (project_path / "package-lock.json").is_file():
+        manager = "npm"
+    elif (project_path / "pnpm-lock.yaml").is_file():
+        manager = "pnpm"
+    elif (project_path / "yarn.lock").is_file():
+        manager = "yarn"
+    else:
+        manager = "npm"
+
+    if manager == "npm":
+        if (project_path / "package-lock.json").is_file():
+            return manager, ("npm", "ci"), "package-lock.json"
+
+        return manager, ("npm", "install"), "package.json"
+
+    if manager == "pnpm":
+        return (
+            manager,
+            ("pnpm", "install", "--frozen-lockfile"),
+            (
+                "pnpm-lock.yaml"
+                if (project_path / "pnpm-lock.yaml").is_file()
+                else "package.json packageManager"
+            ),
+        )
+
+    if manager == "yarn":
+        return manager, ("yarn", "install"), "yarn.lock"
+
+    raise RepositoryTestRunnerError(
+        "package.json selects an unsupported package manager."
+    )
+
+
+def node_test_command(
+    package_manager: str,
+    script_name: str,
+) -> tuple[str, ...]:
+    if package_manager == "npm":
+        if script_name == "test":
+            return ("npm", "test")
+
+        return ("npm", "run", script_name)
+
+    if script_name == "test":
+        return (package_manager, "test")
+
+    return (package_manager, "run", script_name)
+
+
+def build_node_repository_execution_strategy(
+    project_path: Path,
+    *,
+    project_root: str = ".",
+) -> RepositoryExecutionStrategy:
+    package_data = read_node_package_data(
+        project_path
+    )
+    package_manager, install_command, manager_evidence = (
+        detect_node_package_manager(
+            project_path,
+            package_data,
+        )
+    )
+    scripts = package_data.get("scripts", {})
+
+    if not isinstance(scripts, dict):
+        scripts = {}
+
+    selected_script = next(
+        (
+            name
+            for name in (
+                "test",
+                "test:unit",
+                "check",
+            )
+            if isinstance(scripts.get(name), str)
+        ),
+        None,
+    )
+
+    if selected_script is None:
+        raise RepositoryTestRunnerError(
+            "Automatic Node testing could not identify a "
+            "repository-owned test or check script."
+        )
+
+    runtime_version, runtime_evidence = (
+        select_node_runtime_version(project_path)
+    )
+    setup_commands: list[tuple[str, ...]] = []
+
+    if package_manager in {"pnpm", "yarn"}:
+        setup_commands.append(("corepack", "enable"))
+
+    setup_commands.append(install_command)
+
+    return RepositoryExecutionStrategy(
+        ecosystem=NODE_ECOSYSTEM.name,
+        runtime_version=runtime_version,
+        project_root=project_root,
+        docker_image=(
+            NODE_ECOSYSTEM.docker_image_for_runtime(
+                runtime_version
+            )
+        ),
+        setup_commands=tuple(setup_commands),
+        background_commands=(),
+        pre_test_commands=(),
+        test_commands=(
+            node_test_command(
+                package_manager,
+                selected_script,
+            ),
+        ),
+        environment_variables={},
+        test_network_mode=RepositoryTestNetworkMode.NONE,
+        services=(),
+        evidence=(
+            f"Node {runtime_version}: {runtime_evidence}",
+            f"Package manager: {manager_evidence}",
+            f"package.json scripts.{selected_script}",
+        ),
+    )
+
+
+def build_repository_test_strategy(
+    repository_path: Path,
+    issue_text: str | None = None,
+    *,
+    project_root: str = ".",
+) -> RepositoryExecutionStrategy:
+    repository_root = repository_path.resolve()
+    project_path = (
+        repository_root / project_root
+    ).resolve()
+
+    try:
+        project_path.relative_to(repository_root)
+    except ValueError as error:
+        raise RepositoryTestRunnerError(
+            "Project root escapes the repository."
+        ) from error
+
+    if not project_path.is_dir():
+        raise RepositoryTestRunnerError(
+            "Project root does not exist or is not a directory."
+        )
+
+    if (project_path / "package.json").is_file():
+        return build_node_repository_execution_strategy(
+            project_path,
+            project_root=project_root,
+        )
+
+    python_evidence = any(
+        any(project_path.glob(pattern))
+        for pattern in PYTHON_ECOSYSTEM.evidence_paths
+    )
+
+    if python_evidence or (project_path / "tests").is_dir():
+        return build_python_repository_execution_strategy(
+            project_path,
+            issue_text,
+            project_root=project_root,
+        )
+
+    supported = ", ".join(
+        sorted(
+            definition.name
+            for definition in (
+                PYTHON_ECOSYSTEM,
+                NODE_ECOSYSTEM,
+            )
+        )
+    )
+    raise RepositoryTestRunnerError(
+        "Automatic repository testing could not identify "
+        f"a registered ecosystem ({supported})."
     )
 
 def run_repository_tests(
@@ -2124,8 +2673,6 @@ def execute_repository_test_strategy(
     strategy: RepositoryTestStrategy,
     progress_callback: ProgressCallback | None = None,
     proposed_files: list[FileReplacement] | None = None,
-    *,
-    protect_repository_files: bool = False,
 ) -> RepositoryTestResult:
     report_progress(
     progress_callback,
@@ -2140,36 +2687,48 @@ def execute_repository_test_strategy(
             "Repository folder does not exist."
         )
 
-    if protect_repository_files and proposed_files:
+    if (
+        strategy.services
+        and strategy.test_network_mode
+        == RepositoryTestNetworkMode.NONE
+    ):
         raise RepositoryTestRunnerError(
-            "Protected repository verification cannot "
-            "apply candidate files."
+            "Service containers cannot be used with network-none tests."
         )
 
-    repository_snapshot = (
-        snapshot_repository_files(
-            repository_path
-        )
-        if protect_repository_files
-        else None
-    )
     dependency_setup = " && ".join(
-        strategy.dependency_setup_commands
+        render_repository_command(command)
+        for command in strategy.setup_commands
+    ) or "true"
+    native_test_command = " && ".join(
+        render_repository_command(command)
+        for command in strategy.test_commands
     )
-    native_test_command = strategy.test_command
+    foreground_pre_test_command = " && ".join(
+        render_repository_command(command)
+        for command in strategy.pre_test_commands
+    ) or "true"
     test_environment_command = (
         build_test_environment_command(
             strategy.test_virtual_env
         )
     )
-    runner_readiness_command = (
-        build_test_runner_readiness_command(
-            native_test_command
-        )
-    )
+    runner_readiness_command = "true"
+
+    if strategy.ecosystem == "python":
+        try:
+            runner_readiness_command = (
+                build_test_runner_readiness_command(
+                    strategy.test_command
+                )
+            )
+        except RepositoryTestRunnerError:
+            pass
     docker_session: DockerRuntimeSession = (
         start_docker_runtime_if_needed()
         )
+    service_container_names: list[str] = []
+    test_network_name: str | None = None
     report_progress(
     progress_callback,
     15,
@@ -2196,6 +2755,14 @@ def execute_repository_test_strategy(
                 0o777
             )
             candidate_overlay_command = ""
+            project_workspace = (
+                "/test-environment/workspace"
+                if strategy.project_root == "."
+                else (
+                    "/test-environment/workspace/"
+                    + strategy.project_root
+                )
+            )
 
             if proposed_files:
                 candidate_overrides_path = (
@@ -2222,7 +2789,7 @@ def execute_repository_test_strategy(
                     "cp -a /workspace/. "
                     "/test-environment/workspace/ && "
                     f"{candidate_overlay_command}"
-                    "cd /test-environment/workspace && "
+                    f"cd {shlex.quote(project_workspace)} && "
                     f"{dependency_setup} && "
                     f"{test_environment_command}"
                     f"{runner_readiness_command}"
@@ -2235,6 +2802,10 @@ def execute_repository_test_strategy(
                     test_environment_path,
                     dependency_command,
                     disable_network=False,
+                    docker_image=strategy.docker_image,
+                    environment_variables=(
+                        strategy.environment_variables
+                    ),
                 )
             )
 
@@ -2272,64 +2843,107 @@ def execute_repository_test_strategy(
                     stderr=dependency_stderr,
                 )
 
-            if repository_snapshot is not None:
-                repository_mutations = (
-                    find_repository_setup_mutations(
-                        repository_snapshot,
-                        test_environment_path
-                        / "workspace",
-                    )
-                )
-
-                if repository_mutations:
-                    mutation_details = ", ".join(
-                        repository_mutations
-                    )
-                    report_progress(
-                        progress_callback,
-                        95,
-                        "Dependency setup modified repository files",
-                    )
-                    return RepositoryTestResult(
-                        passed=False,
-                        stage="dependency_setup",
-                        command=dependency_command,
-                        exit_code=1,
-                        duration_seconds=round(
-                            time.monotonic()
-                            - started_at,
-                            3,
-                        ),
-                        stdout=dependency_stdout,
-                        stderr=trim_command_output(
-                            (
-                                dependency_stderr
-                                + "\nRepository setup modified "
-                                "protected repository files: "
-                                + mutation_details
-                            ).strip()
-                        ),
-                    )
-
             report_progress(
                 progress_callback,
                 50,
                 "Dependencies ready",
             )
 
+            if (
+                strategy.services
+                or strategy.test_network_mode
+                == RepositoryTestNetworkMode.SERVICES_ONLY
+            ):
+                try:
+                    test_network_name = (
+                        create_repository_test_network(
+                            internal=(
+                                strategy.test_network_mode
+                                == RepositoryTestNetworkMode
+                                .SERVICES_ONLY
+                            )
+                        )
+                    )
+
+                    for service in strategy.services:
+                        service_container_names.append(
+                            start_repository_service(
+                                service,
+                                network_name=(
+                                    test_network_name
+                                ),
+                            )
+                        )
+                except RepositoryServiceStartupError as error:
+                    report_progress(
+                        progress_callback,
+                        95,
+                        "Repository service setup failed",
+                    )
+                    return RepositoryTestResult(
+                        passed=False,
+                        stage="dependency_setup",
+                        command=error.command,
+                        exit_code=error.exit_code,
+                        timed_out=error.timed_out,
+                        duration_seconds=round(
+                            time.monotonic()
+                            - started_at,
+                            3,
+                        ),
+                        stdout=error.stdout,
+                        stderr=trim_command_output(
+                            (
+                                str(error)
+                                + "\n"
+                                + error.stderr
+                            ).strip()
+                        ),
+                    )
+
             report_progress(
                 progress_callback,
                 60,
-                "Running repository tests",
+                "Preparing and running repository tests",
+            )
+
+            pre_test_marker_name = (
+                ".contrigent-pre-test-complete-"
+                + uuid4().hex
+            )
+            pre_test_marker_path = (
+                test_environment_path
+                / pre_test_marker_name
+            )
+            background_commands = "".join(
+                (
+                    render_repository_command(command)
+                    + " >/tmp/contrigent-background-"
+                    + str(index)
+                    + ".log 2>&1 & "
+                )
+                for index, command in enumerate(
+                    strategy.background_commands,
+                    start=1,
+                )
             )
 
             test_command = [
                 "sh",
                 "-lc",
                 (
-                    "cd /test-environment/workspace && "
+                    f"cd {shlex.quote(project_workspace)} && "
                     f"{test_environment_command}"
-                    f"{native_test_command}"
+                    + background_commands
+                    + "if ! ("
+                    + foreground_pre_test_command
+                    + "); then exit "
+                    + str(PRE_TEST_FAILURE_EXIT_CODE)
+                    + "; fi && "
+                    + "touch /test-environment/"
+                    + pre_test_marker_name
+                    + " && "
+                    + native_test_command
                 ),
             ]
 
@@ -2338,7 +2952,15 @@ def execute_repository_test_strategy(
                     repository_path,
                     test_environment_path,
                     test_command,
-                    disable_network=True,
+                    disable_network=(
+                        strategy.test_network_mode
+                        == RepositoryTestNetworkMode.NONE
+                    ),
+                    docker_image=strategy.docker_image,
+                    environment_variables=(
+                        strategy.environment_variables
+                    ),
+                    network_name=test_network_name,
                 )
             )
 
@@ -2361,19 +2983,40 @@ def execute_repository_test_strategy(
                 not test_timed_out
                 and test_exit_code == 0
             )
+            pre_test_completed = (
+                pre_test_marker_path.is_file()
+            )
+            result_stage = (
+                "dependency_setup"
+                if (
+                    test_exit_code
+                    == PRE_TEST_FAILURE_EXIT_CODE
+                    and not pre_test_completed
+                )
+                or (
+                    test_timed_out
+                    and not pre_test_completed
+                )
+                else "tests"
+            )
             report_progress(
                 progress_callback,
                 95,
                 (
                     "Processing test results"
                     if passed
-                    else "Processing test failure"
+                    else (
+                        "Processing pre-test failure"
+                        if result_stage
+                        == "dependency_setup"
+                        else "Processing test failure"
+                    )
                 ),
             )
 
             return RepositoryTestResult(
                 passed=passed,
-                stage="tests",
+                stage=result_stage,
                 command=test_command,
                 exit_code=test_exit_code,
                 timed_out=test_timed_out,
@@ -2386,6 +3029,14 @@ def execute_repository_test_strategy(
                 stderr=test_stderr,
             )
     finally:
+        try:
+            cleanup_repository_services(
+                service_container_names,
+                test_network_name,
+            )
+        except Exception:
+            pass
+
         try:
             stop_docker_runtime_if_started(
                 docker_session

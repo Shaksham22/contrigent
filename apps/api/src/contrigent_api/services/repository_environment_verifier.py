@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from fnmatch import fnmatch
 import re
-import shlex
 from typing import Literal
 from uuid import UUID
 
@@ -15,6 +15,9 @@ from contrigent_api.agents.repository_setup_specialist.agent import (
 )
 from contrigent_api.agents.repository_setup_specialist.output_schema import (
     RepositorySetupProposal,
+)
+from contrigent_api.agents.issue_analyzer.output_schema import (
+    IssueAnalysis,
 )
 from contrigent_api.models.project_context import (
     ProjectContext,
@@ -32,19 +35,16 @@ from contrigent_api.services.repository_git_manager import (
     run_git_command,
 )
 from contrigent_api.services.repository_test_runner import (
-    DOCKER_IMAGE,
-    RepositoryCommandSelection,
+    RepositoryExecutionStrategy,
+    RepositoryService,
     RepositoryTestRunnerError,
-    RepositoryTestStrategy,
-    build_persistent_test_command,
-    build_repository_owned_native_commands,
+    RepositoryTestNetworkMode,
     build_repository_test_strategy,
     execute_repository_test_strategy,
-    get_test_runner,
-    materialize_evidenced_setup_commands,
-    normalize_supported_setup_command,
-    normalize_supported_test_command,
-    setup_command_installs_dependencies,
+)
+from contrigent_api.services.repository_ecosystems import (
+    ECOSYSTEM_REGISTRY,
+    get_ecosystem_definition,
 )
 from contrigent_api.services.run_progress import (
     RunProgressCallback,
@@ -54,46 +54,38 @@ from contrigent_api.services.run_progress import (
 
 
 MAX_SETUP_DISCOVERY_ATTEMPTS = 2
-PYTHON_VERSION_PATTERN = re.compile(
-    r"^3\.\d+$"
+RUNTIME_VERSION_PATTERN = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$"
 )
-UNSAFE_TOKEN_FRAGMENTS = (
-    "&&",
-    "||",
-    ";",
-    "|",
-    ">",
-    "<",
-    "`",
-    "$",
-    "\n",
-    "\r",
+ENVIRONMENT_VARIABLE_NAME_PATTERN = re.compile(
+    r"^[A-Za-z_][A-Za-z0-9_]*$"
 )
-LOCK_GENERATION_PREFIXES = (
-    ("uv", "lock"),
-    ("poetry", "lock"),
-    ("uvx", "poetry", "lock"),
+NETWORK_NAME_PATTERN = re.compile(
+    r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$"
 )
-UNSAFE_INSTALL_OPTIONS = {
-    "--cache-dir",
-    "--config-settings",
-    "--prefix",
-    "--root",
-    "--target",
+FORBIDDEN_CREDENTIAL_VARIABLES = {
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "DOCKER_HOST",
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "OPENAI_API_KEY",
+    "SSH_AUTH_SOCK",
 }
-SETUP_EVIDENCE_PATHS = (
-    ".python-version",
-    "CONTRIBUTING.md",
-    "noxfile.py",
-    "poetry.lock",
-    "pyproject.toml",
-    "pytest.ini",
-    "requirements-dev.txt",
-    "requirements-test.txt",
-    "requirements-testing.txt",
-    "requirements.txt",
-    "tox.ini",
-    "uv.lock",
+COMMON_SETUP_EVIDENCE_PATTERNS = (
+    "CONTRIBUTING*",
+    "AGENTS.md",
+    "README*",
+    ".github/workflows/*",
+    "Makefile",
+    "justfile",
+    "Taskfile*",
+    "scripts/*",
+    "Dockerfile*",
+    "compose*.yml",
+    "compose*.yaml",
+    "docker-compose*.yml",
+    "docker-compose*.yaml",
 )
 
 
@@ -116,8 +108,8 @@ class RepositorySetupProposalError(
 
 
 @dataclass(frozen=True)
-class VerifiedRepositoryTestRecipe:
-    strategy: RepositoryTestStrategy
+class VerifiedRepositoryEnvironment:
+    strategy: RepositoryExecutionStrategy
     baseline_result: RepositoryTestResult
     repository_revision: str
     verification_source: Literal[
@@ -126,9 +118,24 @@ class VerifiedRepositoryTestRecipe:
     ]
     setup_verified: bool
     discovery_attempts: int
-    docker_image: str = DOCKER_IMAGE
-    setup_network_enabled: bool = True
-    tests_network_disabled: bool = True
+
+    @property
+    def docker_image(self) -> str:
+        return self.strategy.docker_image
+
+    @property
+    def setup_network_enabled(self) -> bool:
+        return True
+
+    @property
+    def tests_network_disabled(self) -> bool:
+        return (
+            self.strategy.test_network_mode
+            == RepositoryTestNetworkMode.NONE
+        )
+
+
+VerifiedRepositoryTestRecipe = VerifiedRepositoryEnvironment
 
 
 def get_repository_revision(
@@ -143,7 +150,7 @@ def get_repository_revision(
 
 def verify_repository_revision(
     repository_path: Path,
-    recipe: VerifiedRepositoryTestRecipe,
+    recipe: VerifiedRepositoryEnvironment,
 ) -> None:
     actual_revision = get_repository_revision(
         repository_path
@@ -167,182 +174,331 @@ def validate_command_tokens(
         if (
             not isinstance(token, str)
             or not token.strip()
-            or len(token) > 300
+            or "\x00" in token
+            or len(token) > 4_000
         ):
             raise RepositorySetupProposalError(
                 "A proposed command contains an invalid token."
             )
 
-        if any(
-            fragment in token
-            for fragment in UNSAFE_TOKEN_FRAGMENTS
-        ):
+def validate_project_root(
+    project_root: str,
+    repository_path: Path | None = None,
+) -> str:
+    clean_root = project_root.strip() or "."
+    path = PurePosixPath(clean_root)
+
+    if path.is_absolute() or ".." in path.parts:
+        raise RepositorySetupProposalError(
+            "The proposed project root must remain inside "
+            "the repository."
+        )
+
+    normalized = path.as_posix()
+
+    if repository_path is not None:
+        repository_root = repository_path.resolve()
+        candidate = (
+            repository_root / normalized
+        ).resolve()
+
+        try:
+            candidate.relative_to(repository_root)
+        except ValueError as error:
             raise RepositorySetupProposalError(
-                "Shell operators and substitutions are not allowed."
+                "The proposed project root escapes the repository."
+            ) from error
+
+        if not candidate.is_dir():
+            raise RepositorySetupProposalError(
+                "The proposed project root does not exist or "
+                "is not a directory."
             )
 
+    return normalized
+
+
+def directory_has_registered_manifest(
+    directory: Path,
+) -> bool:
+    return any(
+        any(directory.glob(pattern))
+        for definition in ECOSYSTEM_REGISTRY.values()
+        for pattern in definition.evidence_paths
+    )
+
+
+def nearest_manifest_root_for_assignment(
+    repository_path: Path,
+    assigned_file_path: str,
+) -> PurePosixPath | None:
+    relative_path = PurePosixPath(
+        assigned_file_path
+    )
+    candidate = relative_path.parent
+
+    while True:
+        directory = (
+            repository_path / candidate.as_posix()
+        )
+
+        if directory_has_registered_manifest(directory):
+            return candidate
+
+        if candidate == PurePosixPath("."):
+            return None
+
+        candidate = candidate.parent
+
+
+def determine_project_root(
+    repository_path: Path,
+    analysis: IssueAnalysis | None,
+) -> str:
+    repository_root = repository_path.resolve()
+
+    if analysis is None:
+        return "."
+
+    assigned_paths = [
+        file_path
+        for assignment in analysis.worker_assignments
+        for file_path in assignment.files
+    ]
+
+    if not assigned_paths:
+        return "."
+
+    manifest_roots = [
+        nearest_manifest_root_for_assignment(
+            repository_root,
+            file_path,
+        )
+        for file_path in assigned_paths
+    ]
+
+    if any(root is None for root in manifest_roots):
+        return "."
+
+    concrete_roots = [
+        root
+        for root in manifest_roots
+        if root is not None
+    ]
+
+    if len(set(concrete_roots)) == 1:
+        return validate_project_root(
+            concrete_roots[0].as_posix(),
+            repository_root,
+        )
+
+    common_parts = list(concrete_roots[0].parts)
+
+    for root in concrete_roots[1:]:
+        shared_length = 0
+
+        for left, right in zip(
+            common_parts,
+            root.parts,
+            strict=False,
+        ):
+            if left != right:
+                break
+            shared_length += 1
+
+        common_parts = common_parts[:shared_length]
+
+        if not common_parts:
+            break
+
+    common_root = PurePosixPath(*common_parts)
+
+    while True:
+        if directory_has_registered_manifest(
+            repository_root / common_root.as_posix()
+        ):
+            return validate_project_root(
+                common_root.as_posix(),
+                repository_root,
+            )
+
+        if common_root == PurePosixPath("."):
+            return "."
+
+        common_root = common_root.parent
+
+
+def validate_environment_variables(
+    variables: dict[str, str],
+) -> dict[str, str]:
+    validated: dict[str, str] = {}
+
+    for name, value in variables.items():
         if (
-            token.startswith("/")
-            or ".." in PurePosixPath(token).parts
+            ENVIRONMENT_VARIABLE_NAME_PATTERN.fullmatch(name)
+            is None
         ):
             raise RepositorySetupProposalError(
-                "Absolute paths and path traversal are not allowed."
+                "A proposed environment variable name is invalid."
             )
 
-        option_name = token.split(
-            "=",
-            1,
-        )[0]
-
-        if option_name in UNSAFE_INSTALL_OPTIONS:
+        if name.upper() in FORBIDDEN_CREDENTIAL_VARIABLES:
             raise RepositorySetupProposalError(
-                "The proposed command can write outside "
-                "the managed environment."
+                "Repository execution cannot receive host or "
+                "publication credentials."
             )
+
+        if not isinstance(value, str) or "\x00" in value:
+            raise RepositorySetupProposalError(
+                "A proposed environment variable value is invalid."
+            )
+
+        validated[name] = value
+
+    return validated
 
 
 def validate_repository_setup_proposal(
     proposal: RepositorySetupProposal,
-) -> RepositoryTestStrategy:
-    if PYTHON_VERSION_PATTERN.fullmatch(
-        proposal.python_version
-    ) is None:
+    repository_path: Path | None = None,
+) -> RepositoryExecutionStrategy:
+    try:
+        ecosystem = get_ecosystem_definition(
+            proposal.ecosystem
+        )
+    except ValueError as error:
         raise RepositorySetupProposalError(
-            "The proposed Python version must be major.minor."
-        )
+            str(error)
+        ) from error
 
-    normalized_setup_commands: list[
-        tuple[str, ...]
-    ] = []
-    dependency_install_seen = False
-
-    for proposed_command in (
-        proposal.dependency_setup_commands
-    ):
-        validate_command_tokens(
-            proposed_command
-        )
-
-        if any(
-            tuple(
-                proposed_command[
-                    :len(prefix)
-                ]
-            ) == prefix
-            for prefix in LOCK_GENERATION_PREFIXES
-        ):
-            raise RepositorySetupProposalError(
-                "Lock generation is not allowed during "
-                "repository setup discovery."
-            )
-
-        normalized_command = (
-            normalize_supported_setup_command(
-                shlex.join(
-                    proposed_command
-                )
-            )
-        )
-
-        if (
-            normalized_command is None
-            or normalized_command
-            != proposed_command
-        ):
-            raise RepositorySetupProposalError(
-                "The proposed setup command is not supported."
-            )
-
-        if setup_command_installs_dependencies(
-            normalized_command
-        ):
-            dependency_install_seen = True
-
-        normalized_setup_commands.append(
-            tuple(normalized_command)
-        )
-
-    if not dependency_install_seen:
-        raise RepositorySetupProposalError(
-            "The proposal does not install repository dependencies."
-        )
-
-    validate_command_tokens(
-        proposal.test_command
-    )
-    normalized_test_command = (
-        normalize_supported_test_command(
-            shlex.join(
-                proposal.test_command
-            )
-        )
+    runtime_version = (
+        proposal.runtime_version
+        or ecosystem.default_runtime_version
     )
 
     if (
-        normalized_test_command is None
-        or normalized_test_command
-        != proposal.test_command
+        runtime_version is not None
+        and RUNTIME_VERSION_PATTERN.fullmatch(
+            runtime_version
+        ) is None
     ):
         raise RepositorySetupProposalError(
-            "The proposed test command is not supported."
+            "The proposed runtime version is invalid."
         )
 
-    selection = RepositoryCommandSelection(
-        dependency_setup_commands=tuple(
-            normalized_setup_commands
-        ),
-        test_command=tuple(
-            normalized_test_command
-        ),
-        evidence=tuple(
-            proposal.evidence
-        ),
+    project_root = validate_project_root(
+        proposal.project_root,
+        repository_path,
     )
-    test_runner = get_test_runner(
-        selection.test_command
-    )
-    (
-        setup_commands,
-        persistent_runner,
-    ) = materialize_evidenced_setup_commands(
-        selection.dependency_setup_commands,
-        proposal.python_version,
-        test_runner,
+    all_commands = (
+        *proposal.dependency_setup_commands,
+        *proposal.background_commands,
+        *proposal.pre_test_commands,
+        *proposal.test_commands,
     )
 
-    if persistent_runner is None:
+    for command in all_commands:
+        validate_command_tokens(command)
+
+    environment_variables = (
+        validate_environment_variables(
+            proposal.environment_variables
+        )
+    )
+    services: list[RepositoryService] = []
+
+    for service in proposal.services:
+        if (
+            NETWORK_NAME_PATTERN.fullmatch(service.name)
+            is None
+            or NETWORK_NAME_PATTERN.fullmatch(
+                service.network_alias
+            )
+            is None
+        ):
+            raise RepositorySetupProposalError(
+                "A proposed service name or network alias is invalid."
+            )
+
+        if (
+            not service.image.strip()
+            or service.image.startswith("-")
+            or any(character.isspace() for character in service.image)
+        ):
+            raise RepositorySetupProposalError(
+                "A proposed service image is invalid."
+            )
+
+        if service.command:
+            validate_command_tokens(service.command)
+
+        if service.readiness_command:
+            validate_command_tokens(
+                service.readiness_command
+            )
+
+        services.append(
+            RepositoryService(
+                name=service.name,
+                image=service.image,
+                command=tuple(service.command),
+                environment_variables=(
+                    validate_environment_variables(
+                        service.environment_variables
+                    )
+                ),
+                network_alias=service.network_alias,
+                readiness_command=tuple(
+                    service.readiness_command
+                ),
+                startup_timeout_seconds=(
+                    service.startup_timeout_seconds
+                ),
+            )
+        )
+
+    test_network_mode = RepositoryTestNetworkMode(
+        proposal.test_network_mode.value
+    )
+
+    if services and test_network_mode == RepositoryTestNetworkMode.NONE:
         raise RepositorySetupProposalError(
-            "The proposal did not create a persistent "
-            "test environment."
+            "Service containers require services_only or internet "
+            "test networking."
         )
 
-    if test_runner in {"nox", "tox"}:
-        (
-            runner_setup,
-            test_command,
-        ) = build_repository_owned_native_commands(
-            test_runner,
-            list(selection.test_command),
-            persistent_runner,
-        )
-        setup_commands.append(
-            runner_setup
-        )
-    else:
-        test_command = build_persistent_test_command(
-            list(selection.test_command),
-            persistent_runner,
-        )
-
-    return RepositoryTestStrategy(
-        python_version=proposal.python_version,
-        dependency_setup_commands=tuple(
-            setup_commands
+    return RepositoryExecutionStrategy(
+        ecosystem=ecosystem.name,
+        runtime_version=runtime_version,
+        project_root=project_root,
+        docker_image=(
+            ecosystem.docker_image_for_runtime(
+                runtime_version
+            )
         ),
-        test_command=test_command,
+        setup_commands=tuple(
+            tuple(command)
+            for command
+            in proposal.dependency_setup_commands
+        ),
+        background_commands=tuple(
+            tuple(command)
+            for command in proposal.background_commands
+        ),
+        pre_test_commands=tuple(
+            tuple(command)
+            for command in proposal.pre_test_commands
+        ),
+        test_commands=tuple(
+            tuple(command)
+            for command in proposal.test_commands
+        ),
+        environment_variables=environment_variables,
+        test_network_mode=test_network_mode,
+        services=tuple(services),
         evidence=(
             "Repository Setup Specialist fallback",
-            *selection.evidence,
+            *proposal.evidence,
         ),
     )
 
@@ -351,15 +507,45 @@ def build_setup_specialist_input(
     project: ProjectContext,
     previous_failure: str,
     attempt: int,
+    project_root: str = ".",
 ) -> str:
+    ecosystem_evidence_patterns = tuple(
+        pattern
+        for definition in ECOSYSTEM_REGISTRY.values()
+        for pattern in definition.evidence_paths
+    )
+    preferred_paths = tuple(
+        path
+        for path in project.files
+        if (
+            any(
+                fnmatch(path, pattern)
+                or fnmatch(Path(path).name, pattern)
+                for pattern in COMMON_SETUP_EVIDENCE_PATTERNS
+            )
+            or (
+                (
+                    project_root == "."
+                    or path == project_root
+                    or path.startswith(project_root + "/")
+                )
+                and any(
+                    fnmatch(path, pattern)
+                    or fnmatch(Path(path).name, pattern)
+                    for pattern
+                    in ecosystem_evidence_patterns
+                )
+            )
+        )
+    )
     repository_context = build_repository_context(
         project.files,
         query_text=(
-            "Python dependency setup pytest nox tox "
-            "CI workflow contributing requirements "
+            "repository dependency setup build test scripts "
+            "CI workflow contributing package manager services "
             + previous_failure
         ),
-        preferred_paths=SETUP_EVIDENCE_PATHS,
+        preferred_paths=preferred_paths,
         max_context_chars=80_000,
     )
 
@@ -367,9 +553,13 @@ def build_setup_specialist_input(
 === REPOSITORY SETUP DISCOVERY ===
 Attempt: {attempt} of {MAX_SETUP_DISCOVERY_ATTEMPTS}
 
-Propose one supported Python dependency setup and repository-native test recipe.
-Commands must be argument lists. Do not propose source/configuration edits, lock
-generation, Git commands, filesystem mutation, arbitrary scripts, or shell syntax.
+Propose one repository-native setup and test recipe for project root:
+{project_root}
+
+Commands must be structured argument lists. Repository-owned scripts, package
+manager commands, build tools, local background processes, disposable service
+containers, and normal file generation inside the sandbox are allowed when the
+repository evidence requires them. Do not propose source patches or publication.
 
 === PREVIOUS DETERMINISTIC OR DISCOVERY FAILURE ===
 {previous_failure}
@@ -389,6 +579,7 @@ async def propose_repository_setup(
     project: ProjectContext,
     previous_failure: str,
     attempt: int,
+    project_root: str = ".",
     *,
     run_id: UUID,
 ) -> RepositorySetupProposal:
@@ -396,6 +587,7 @@ async def propose_repository_setup(
         project,
         previous_failure,
         attempt,
+        project_root,
     )
     configured_agent = (
         configure_agent_for_run_invocation(
@@ -453,11 +645,16 @@ def report_preflight_failure(
 
 async def verify_repository_environment(
     project: ProjectContext,
+    analysis: IssueAnalysis | None = None,
     progress_callback: RunProgressCallback | None = None,
     *,
     run_id: UUID,
 ) -> VerifiedRepositoryTestRecipe:
     repository_path = project.repository_path.resolve()
+    project_root = determine_project_root(
+        repository_path,
+        analysis,
+    )
     repository_revision = get_repository_revision(
         repository_path
     )
@@ -474,7 +671,7 @@ async def verify_repository_environment(
     )
 
     deterministic_strategy: (
-        RepositoryTestStrategy | None
+        RepositoryExecutionStrategy | None
     ) = None
     previous_failure = ""
     last_result: RepositoryTestResult | None = None
@@ -484,6 +681,7 @@ async def verify_repository_environment(
             build_repository_test_strategy(
                 repository_path,
                 project.issue,
+                project_root=project_root,
             )
         )
     except RepositoryTestRunnerError as error:
@@ -498,24 +696,12 @@ async def verify_repository_environment(
         last_result = execute_repository_test_strategy(
             repository_path,
             deterministic_strategy,
-            protect_repository_files=True,
         )
 
-        if last_result.stage == "tests":
-            if not last_result.passed:
-                message = (
-                    "Untouched repository baseline tests failed."
-                )
-                report_preflight_failure(
-                    progress_callback,
-                    message,
-                    last_result,
-                )
-                raise RepositoryEnvironmentVerificationError(
-                    message,
-                    last_result,
-                )
-
+        if (
+            last_result.stage == "tests"
+            and last_result.passed
+        ):
             report_run_progress(
                 progress_callback,
                 "preflight_passed",
@@ -552,13 +738,35 @@ async def verify_repository_environment(
                 project,
                 previous_failure,
                 attempt,
+                project_root,
                 run_id=run_id,
             )
+
+            if "project_root" not in proposal.model_fields_set:
+                proposal = proposal.model_copy(
+                    update={
+                        "project_root": project_root,
+                    }
+                )
+
             strategy = (
                 validate_repository_setup_proposal(
-                    proposal
+                    proposal,
+                    repository_path,
                 )
             )
+
+            if (
+                project_root != "."
+                and strategy.project_root != project_root
+                and not strategy.project_root.startswith(
+                    project_root + "/"
+                )
+            ):
+                raise RepositorySetupProposalError(
+                    "The proposed project root is unrelated to "
+                    "the Manager-selected subproject."
+                )
         except Exception as error:
             previous_failure = (
                 "Setup proposal was rejected: "
@@ -574,24 +782,12 @@ async def verify_repository_environment(
         last_result = execute_repository_test_strategy(
             repository_path,
             strategy,
-            protect_repository_files=True,
         )
 
-        if last_result.stage == "tests":
-            if not last_result.passed:
-                message = (
-                    "Untouched repository baseline tests failed."
-                )
-                report_preflight_failure(
-                    progress_callback,
-                    message,
-                    last_result,
-                )
-                raise RepositoryEnvironmentVerificationError(
-                    message,
-                    last_result,
-                )
-
+        if (
+            last_result.stage == "tests"
+            and last_result.passed
+        ):
             report_run_progress(
                 progress_callback,
                 "preflight_passed",
@@ -613,8 +809,8 @@ async def verify_repository_environment(
         )
 
     message = (
-        "Contrigent could not establish a reliable "
-        "repository test environment."
+        "Contrigent could not establish a passing "
+        "untouched repository baseline."
     )
     report_preflight_failure(
         progress_callback,

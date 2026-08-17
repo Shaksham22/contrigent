@@ -43,6 +43,7 @@ from contrigent_api.services.repository_environment_verifier import (
 )
 from contrigent_api.services.repository_test_runner import (
     RepositoryTestStrategy,
+    RepositoryTestNetworkMode,
 )
 
 from contrigent_api.models.project_context import (
@@ -171,11 +172,20 @@ def test_verified_repository_recipe_is_stored_for_run() -> None:
     )
     recipe = VerifiedRepositoryTestRecipe(
         strategy=RepositoryTestStrategy(
-            python_version="3.12",
-            dependency_setup_commands=(
-                "uv sync --group test",
+            ecosystem="python",
+            runtime_version="3.12",
+            project_root=".",
+            docker_image=(
+                "ghcr.io/astral-sh/uv:"
+                "python3.12-bookworm-slim"
             ),
-            test_command="pytest",
+            setup_commands=(("uv", "sync", "--group", "test"),),
+            background_commands=(),
+            pre_test_commands=(),
+            test_commands=(("pytest",),),
+            environment_variables={},
+            test_network_mode=RepositoryTestNetworkMode.NONE,
+            services=(),
             evidence=("pyproject.toml",),
         ),
         baseline_result=baseline_result,

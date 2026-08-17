@@ -39,8 +39,6 @@ from contrigent_api.services.run_memory_store import (
     complete_review,
     complete_worker_work,
     create_run,
-    get_agent_invocation_count,
-    get_run,
     get_verified_repository_test_recipe as get_stored_recipe,
     record_candidate_test_result,
     start_review,
@@ -52,27 +50,39 @@ from contrigent_api.services.repository_environment_verifier import (
 )
 from contrigent_api.services.repository_test_runner import (
     RepositoryTestStrategy,
-)
-from contrigent_api.services.contribution_policy_checker import (
-    ContributionPolicyOutcome,
-    ContributionPolicyResult,
+    RepositoryTestNetworkMode,
 )
 from contrigent_api.services.github_pull_request_creator import (
     GitHubPullRequestResult,
 )
 from contrigent_api.services import (
+    contribution_policy_checker,
     github_issue_commenter,
+    repository_test_runner,
 )
 
 
 def make_verified_recipe() -> VerifiedRepositoryTestRecipe:
     return VerifiedRepositoryTestRecipe(
         strategy=RepositoryTestStrategy(
-            python_version="3.12",
-            dependency_setup_commands=(
-                "uv sync --group test",
+            ecosystem="python",
+            runtime_version="3.12",
+            project_root=".",
+            docker_image=(
+                "ghcr.io/astral-sh/uv:"
+                "python3.12-bookworm-slim"
             ),
-            test_command="pytest",
+            setup_commands=(("uv", "sync", "--group", "test"),),
+            background_commands=(
+                ("python", "tests/server.py"),
+            ),
+            pre_test_commands=(
+                ("python", "scripts/prepare_tests.py"),
+            ),
+            test_commands=(("pytest",),),
+            environment_variables={},
+            test_network_mode=RepositoryTestNetworkMode.NONE,
+            services=(),
             evidence=("pyproject.toml",),
         ),
         baseline_result=RepositoryTestResult(
@@ -127,7 +137,14 @@ def make_analysis(
         ],
         risks=[],
         feasibility=Feasibility.FEASIBLE,
-        worker_assignments=[],
+        worker_assignments=[
+            WorkerAssignment(
+                order=1,
+                worker_id="python_solver",
+                task="Implement the requested source change.",
+                files=["src/example.py"],
+            )
+        ],
         implementation_plan=[
             ImplementationStep(
                 order=1,
@@ -135,6 +152,22 @@ def make_analysis(
             )
         ],
     )
+
+
+def assign_worker(
+    analysis: IssueAnalysis,
+    worker_id: str,
+    *files: str,
+) -> IssueAnalysis:
+    analysis.worker_assignments = [
+        WorkerAssignment(
+            order=1,
+            worker_id=worker_id,
+            task="Complete the assigned work.",
+            files=list(files),
+        )
+    ]
+    return analysis
 
 
 def make_project(
@@ -229,13 +262,25 @@ def make_worker_result(
 
 
 @pytest.mark.asyncio
-async def test_repository_preflight_completes_before_manager_analysis(
+async def test_manager_analysis_completes_before_repository_preflight(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project = make_project(tmp_path)
     recipe = make_verified_recipe()
     call_order: list[str] = []
+    branch_prepared = False
+
+    def fake_create_run_branch(
+        *_args,
+        **_kwargs,
+    ) -> tuple[str, str]:
+        nonlocal branch_prepared
+        branch_prepared = True
+        return (
+            "main",
+            "contrigent/test-run",
+        )
 
     monkeypatch.setattr(
         run_routes,
@@ -252,32 +297,25 @@ async def test_repository_preflight_completes_before_manager_analysis(
     monkeypatch.setattr(
         run_routes,
         "create_run_branch",
-        lambda *_args, **_kwargs: (
-            "main",
-            "contrigent/test-run",
-        ),
+        fake_create_run_branch,
     )
+
+    def fail_policy_check(*_args, **_kwargs):
+        pytest.fail(
+            "The dormant contribution-policy checker was invoked."
+        )
+
     monkeypatch.setattr(
-        run_routes,
+        contribution_policy_checker,
         "check_contribution_policy",
-        lambda *_args: (
-            call_order.append("policy")
-            or ContributionPolicyResult(
-                outcome=(
-                    ContributionPolicyOutcome
-                    .NO_EXPLICIT_PROHIBITION
-                ),
-                source=None,
-                evidence=None,
-                checked_sources=(),
-            )
-        ),
+        fail_policy_check,
     )
 
     async def fake_verify_environment(
         *_args,
         **_kwargs,
     ) -> VerifiedRepositoryTestRecipe:
+        assert branch_prepared is True
         call_order.append("preflight")
         return recipe
 
@@ -286,7 +324,11 @@ async def test_repository_preflight_completes_before_manager_analysis(
         **_kwargs,
     ):
         call_order.append("manager")
-        return make_analysis("Verified plan."), None
+        return assign_worker(
+            make_analysis("Verified plan."),
+            "python_solver",
+            "src/example.py",
+        ), None
 
     monkeypatch.setattr(
         run_routes,
@@ -311,15 +353,15 @@ async def test_repository_preflight_completes_before_manager_analysis(
     )
 
     assert call_order == [
-        "policy",
-        "preflight",
         "manager",
+        "preflight",
     ]
+    assert branch_prepared is True
     assert get_stored_recipe(result.id) is recipe
 
 
 @pytest.mark.asyncio
-async def test_baseline_failure_stops_before_manager_analysis(
+async def test_baseline_failure_stops_after_manager_and_before_workers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -347,19 +389,6 @@ async def test_baseline_failure_stops_before_manager_analysis(
             "contrigent/test-run",
         ),
     )
-    monkeypatch.setattr(
-        run_routes,
-        "check_contribution_policy",
-        lambda *_args: ContributionPolicyResult(
-            outcome=(
-                ContributionPolicyOutcome
-                .NO_EXPLICIT_PROHIBITION
-            ),
-            source=None,
-            evidence=None,
-            checked_sources=(),
-        ),
-    )
 
     async def fake_verify_environment(
         *_args,
@@ -376,7 +405,11 @@ async def test_baseline_failure_stops_before_manager_analysis(
     ):
         nonlocal manager_calls
         manager_calls += 1
-        return make_analysis("Must not run."), None
+        return assign_worker(
+            make_analysis("Analyze before preflight."),
+            "python_solver",
+            "src/example.py",
+        ), None
 
     def fake_rollback(*_args, **_kwargs) -> None:
         nonlocal rollback_calls
@@ -413,168 +446,17 @@ async def test_baseline_failure_stops_before_manager_analysis(
             )
         )
 
-    assert manager_calls == 0
+    assert manager_calls == 1
     assert rollback_calls == 1
 
 
 @pytest.mark.asyncio
-async def test_blocked_current_upstream_policy_stops_before_preflight(
+async def test_documentation_only_analysis_skips_repository_environment(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project = make_project(tmp_path)
-    project.files["CONTRIBUTING.md"] = (
-        "AI-assisted contributions are welcome."
-    )
-    created_runs = []
-    call_order: list[str] = []
-    preflight_calls = 0
-    manager_calls = 0
-    rollback_calls = 0
-    comment_calls = 0
-    original_create_run = create_run
-
-    def capture_run(*args, **kwargs):
-        run = original_create_run(
-            *args,
-            **kwargs,
-        )
-        created_runs.append(run)
-        return run
-
-    def create_current_upstream_branch(
-        *_args,
-        **_kwargs,
-    ):
-        call_order.append("branch")
-        (tmp_path / "CONTRIBUTING.md").write_text(
-            "Do not use AI or LLM tools to contribute.",
-            encoding="utf-8",
-        )
-        return (
-            "main",
-            "contrigent/test-run",
-        )
-
-    async def fake_verify_environment(
-        *_args,
-        **_kwargs,
-    ):
-        nonlocal preflight_calls
-        preflight_calls += 1
-        return make_verified_recipe()
-
-    async def fake_analyze_project(
-        *_args,
-        **_kwargs,
-    ):
-        nonlocal manager_calls
-        manager_calls += 1
-        return make_analysis("Must not run."), None
-
-    def fake_rollback(*_args, **_kwargs) -> None:
-        nonlocal rollback_calls
-        rollback_calls += 1
-        call_order.append("rollback")
-
-    def fake_comment(
-        _issue_url: str,
-        _body: str,
-    ) -> None:
-        nonlocal comment_calls
-        comment_calls += 1
-
-    monkeypatch.setattr(
-        run_routes,
-        "get_or_download_github_project",
-        lambda *_args: SimpleNamespace(
-            project_name="example"
-        ),
-    )
-    monkeypatch.setattr(
-        run_routes,
-        "load_downloaded_github_project",
-        lambda *_args: project,
-    )
-    monkeypatch.setattr(
-        run_routes,
-        "create_run",
-        capture_run,
-    )
-    monkeypatch.setattr(
-        run_routes,
-        "create_run_branch",
-        create_current_upstream_branch,
-    )
-    monkeypatch.setattr(
-        run_routes,
-        "verify_repository_environment",
-        fake_verify_environment,
-    )
-    monkeypatch.setattr(
-        run_routes,
-        "analyze_project",
-        fake_analyze_project,
-    )
-    monkeypatch.setattr(
-        run_routes,
-        "rollback_run_branch",
-        fake_rollback,
-    )
-    monkeypatch.setattr(
-        github_issue_commenter,
-        "create_issue_comment",
-        fake_comment,
-    )
-
-    with pytest.raises(
-        run_routes.HTTPException,
-        match="Contribution blocked",
-    ) as error_info:
-        await run_routes.start_run(
-            run_routes.CreateRunRequest(
-                github_issue_url=(
-                    "https://github.com/example/project/issues/7"
-                ),
-                github_repository_url=(
-                    "https://github.com/example/project"
-                ),
-            )
-        )
-
-    run = created_runs[0]
-    assert error_info.value.status_code == 409
-    assert preflight_calls == 0
-    assert manager_calls == 0
-    assert rollback_calls == 1
-    assert comment_calls == 0
-    assert call_order == [
-        "branch",
-        "rollback",
-    ]
-    assert get_run(run.id).status == RunStatus.FAILED
-    assert get_agent_invocation_count(
-        run.id,
-        "issue_analyzer",
-    ) == 0
-    assert get_agent_invocation_count(
-        run.id,
-        "repository_setup_specialist",
-    ) == 0
-    assert run.worker_results == {}
-    assert run.reviewer_result is None
-    assert run.draft_pr_created is False
-
-
-@pytest.mark.asyncio
-async def test_inconclusive_policy_stops_before_preflight_and_manager(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    project = make_project(tmp_path)
-    preflight_calls = 0
-    manager_calls = 0
-    rollback_calls = 0
+    environment_calls = 0
 
     monkeypatch.setattr(
         run_routes,
@@ -596,45 +478,32 @@ async def test_inconclusive_policy_stops_before_preflight_and_manager(
             "contrigent/test-run",
         ),
     )
-    monkeypatch.setattr(
-        run_routes,
-        "check_contribution_policy",
-        lambda *_args: ContributionPolicyResult(
-            outcome=ContributionPolicyOutcome.INCONCLUSIVE,
-            source="CONTRIBUTING.md",
-            evidence="The policy page could not be retrieved safely.",
-            checked_sources=("CONTRIBUTING.md",),
-            policy_url=(
-                "https://docs.example.org/contributing"
-            ),
-        ),
-    )
-
-    async def fake_verify_environment(
-        *_args,
-        **_kwargs,
-    ):
-        nonlocal preflight_calls
-        preflight_calls += 1
-        return make_verified_recipe()
 
     async def fake_analyze_project(
         *_args,
         **_kwargs,
     ):
-        nonlocal manager_calls
-        manager_calls += 1
-        return make_analysis("Must not run."), None
+        return assign_worker(
+            make_analysis("Update the guide."),
+            "documentation_specialist",
+            "docs/guide.md",
+        ), None
 
-    def fake_rollback(*_args, **_kwargs) -> None:
-        nonlocal rollback_calls
-        rollback_calls += 1
+    async def fake_verify_environment(
+        *_args,
+        **_kwargs,
+    ):
+        nonlocal environment_calls
+        environment_calls += 1
+        pytest.fail(
+            "Documentation-only work started environment verification."
+        )
 
-    monkeypatch.setattr(
-        run_routes,
-        "verify_repository_environment",
-        fake_verify_environment,
-    )
+    def fail_start_docker():
+        pytest.fail(
+            "Documentation-only work started Docker."
+        )
+
     monkeypatch.setattr(
         run_routes,
         "analyze_project",
@@ -642,28 +511,201 @@ async def test_inconclusive_policy_stops_before_preflight_and_manager(
     )
     monkeypatch.setattr(
         run_routes,
-        "rollback_run_branch",
-        fake_rollback,
+        "verify_repository_environment",
+        fake_verify_environment,
+    )
+    monkeypatch.setattr(
+        repository_test_runner,
+        "start_docker_runtime_if_needed",
+        fail_start_docker,
     )
 
-    with pytest.raises(
-        run_routes.HTTPException,
-        match="could not be verified",
+    result = await run_routes.start_run(
+        run_routes.CreateRunRequest(
+            github_issue_url=(
+                "https://github.com/example/demo/issues/1"
+            ),
+            github_repository_url=(
+                "https://github.com/example/demo"
+            ),
+        )
+    )
+
+    assert result.status == RunStatus.AWAITING_PLAN_APPROVAL
+    assert environment_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_any_non_documentation_assignment_requires_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = make_project(tmp_path)
+    recipe = make_verified_recipe()
+    environment_calls = 0
+
+    monkeypatch.setattr(
+        run_routes,
+        "get_or_download_github_project",
+        lambda *_args: SimpleNamespace(
+            project_name="example"
+        ),
+    )
+    monkeypatch.setattr(
+        run_routes,
+        "load_downloaded_github_project",
+        lambda *_args: project,
+    )
+    monkeypatch.setattr(
+        run_routes,
+        "create_run_branch",
+        lambda *_args, **_kwargs: (
+            "main",
+            "contrigent/test-run",
+        ),
+    )
+
+    async def fake_analyze_project(
+        *_args,
+        **_kwargs,
     ):
-        await run_routes.start_run(
-            run_routes.CreateRunRequest(
-                github_issue_url=(
-                    "https://github.com/example/project/issues/7"
-                ),
-                github_repository_url=(
-                    "https://github.com/example/project"
-                ),
-            )
+        analysis = make_analysis("Update docs and code.")
+        analysis.worker_assignments = [
+            WorkerAssignment(
+                order=1,
+                worker_id="documentation_specialist",
+                task="Update docs.",
+                files=["docs/guide.md"],
+            ),
+            WorkerAssignment(
+                order=2,
+                worker_id="configuration_specialist",
+                task="Update configuration.",
+                files=["pyproject.toml"],
+            ),
+        ]
+        return analysis, None
+
+    async def fake_verify_environment(
+        *_args,
+        **_kwargs,
+    ):
+        nonlocal environment_calls
+        environment_calls += 1
+        return recipe
+
+    monkeypatch.setattr(
+        run_routes,
+        "analyze_project",
+        fake_analyze_project,
+    )
+    monkeypatch.setattr(
+        run_routes,
+        "verify_repository_environment",
+        fake_verify_environment,
+    )
+
+    result = await run_routes.start_run(
+        run_routes.CreateRunRequest(
+            github_issue_url=(
+                "https://github.com/example/demo/issues/1"
+            ),
+            github_repository_url=(
+                "https://github.com/example/demo"
+            ),
+        )
+    )
+
+    assert result.status == RunStatus.AWAITING_PLAN_APPROVAL
+    assert environment_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_documentation_only_workers_and_reviewer_run_without_tests(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = make_project(tmp_path)
+    analysis = assign_worker(
+        make_analysis("Update the guide."),
+        "documentation_specialist",
+        "docs/guide.md",
+    )
+    run = create_run(
+        "example",
+        ProjectSource.GITHUB,
+        github_issue_url=(
+            "https://github.com/example/demo/issues/1"
+        ),
+        github_repository_url=(
+            "https://github.com/example/demo"
+        ),
+    )
+    attach_analysis(run.id, analysis)
+    replacement = FileReplacement(
+        file_path="docs/guide.md",
+        reason="Clarify usage.",
+        replacement_content="# Guide\n",
+    )
+
+    monkeypatch.setattr(
+        run_routes,
+        "load_project",
+        lambda *_args: project,
+    )
+
+    async def fake_run_workers(
+        *_args,
+        **_kwargs,
+    ):
+        return (
+            {
+                "documentation_specialist": WorkerResult(
+                    summary="Updated the guide.",
+                    files_to_replace=[replacement],
+                )
+            },
+            [replacement],
         )
 
-    assert preflight_calls == 0
-    assert manager_calls == 0
-    assert rollback_calls == 1
+    async def fake_review(
+        *_args,
+        **_kwargs,
+    ) -> ReviewerResult:
+        return ReviewerResult(
+            recommendation="approve",
+            summary="Documentation is accurate.",
+            findings=[],
+            files_reviewed=["docs/guide.md"],
+        )
+
+    def fail_execute(*_args, **_kwargs):
+        pytest.fail(
+            "Documentation-only candidate tests were invoked."
+        )
+
+    monkeypatch.setattr(
+        run_routes,
+        "run_assigned_workers",
+        fake_run_workers,
+    )
+    monkeypatch.setattr(
+        run_routes,
+        "run_reviewer",
+        fake_review,
+    )
+    monkeypatch.setattr(
+        run_routes,
+        "execute_repository_test_strategy",
+        fail_execute,
+    )
+
+    result = await run_routes.run_approved_plan(run.id)
+
+    assert result.status == RunStatus.AWAITING_FINAL_APPROVAL
+    assert result.candidate_test_result is None
+    assert result.testing_rounds_completed == 0
+    assert result.repository_tests_completed is False
 
 
 @pytest.mark.asyncio
@@ -1798,6 +1840,12 @@ async def test_candidate_testing_replays_stored_strategy(
 
     assert result.status == RunStatus.AWAITING_FINAL_APPROVAL
     assert replayed_strategies == [recipe.strategy]
+    assert replayed_strategies[0].background_commands == (
+        ("python", "tests/server.py"),
+    )
+    assert replayed_strategies[0].pre_test_commands == (
+        ("python", "scripts/prepare_tests.py"),
+    )
 
 
 def test_final_testing_replays_stored_strategy(
@@ -1889,6 +1937,147 @@ def test_final_testing_replays_stored_strategy(
 
     assert result.status == RunStatus.TESTS_FAILED
     assert replayed_strategies == [recipe.strategy]
+    assert replayed_strategies[0].background_commands == (
+        ("python", "tests/server.py"),
+    )
+    assert replayed_strategies[0].pre_test_commands == (
+        ("python", "scripts/prepare_tests.py"),
+    )
+
+
+def test_documentation_only_final_approval_publishes_without_test_claim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = make_project(tmp_path)
+    analysis = assign_worker(
+        make_analysis("Update the guide."),
+        "documentation_specialist",
+        "docs/guide.md",
+    )
+    replacement = FileReplacement(
+        file_path="docs/guide.md",
+        reason="Clarify usage.",
+        replacement_content="# Guide\n",
+    )
+    run = create_run(
+        "example",
+        ProjectSource.GITHUB,
+        github_issue_url=(
+            "https://github.com/example/demo/issues/1"
+        ),
+        github_repository_url=(
+            "https://github.com/example/demo"
+        ),
+    )
+    run.original_branch = "main"
+    run.run_branch = "contrigent/test-run"
+    attach_analysis(run.id, analysis)
+    approve_plan(run.id)
+    start_worker_work(run.id)
+    complete_worker_work(
+        run.id,
+        {
+            "documentation_specialist": WorkerResult(
+                summary="Updated documentation.",
+                files_to_replace=[replacement],
+            )
+        },
+        [replacement],
+    )
+    start_review(run.id)
+    complete_review(
+        run.id,
+        ReviewerResult(
+            recommendation="approve",
+            summary="Documentation is accurate.",
+            findings=[],
+            files_reviewed=["docs/guide.md"],
+        ),
+    )
+
+    monkeypatch.setattr(
+        run_routes,
+        "get_github_token",
+        lambda: "token",
+    )
+    monkeypatch.setattr(
+        run_routes,
+        "load_project",
+        lambda *_args: project,
+    )
+    monkeypatch.setattr(
+        run_routes,
+        "ensure_expected_run_branch",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        run_routes,
+        "get_verified_repository_test_recipe",
+        lambda *_args: pytest.fail(
+            "Documentation-only publication requested a test recipe."
+        ),
+    )
+    monkeypatch.setattr(
+        run_routes,
+        "execute_repository_test_strategy",
+        lambda *_args, **_kwargs: pytest.fail(
+            "Documentation-only final tests were invoked."
+        ),
+    )
+    monkeypatch.setattr(
+        run_routes,
+        "apply_approved_files",
+        lambda *_args: [tmp_path / "docs" / "guide.md"],
+    )
+    monkeypatch.setattr(
+        run_routes,
+        "create_approved_commit",
+        lambda *_args, **_kwargs: "a" * 40,
+    )
+    monkeypatch.setattr(
+        run_routes,
+        "get_authenticated_github_user",
+        lambda: "contributor",
+    )
+    monkeypatch.setattr(
+        run_routes,
+        "push_run_branch",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        run_routes,
+        "run_pull_request_documentation",
+        lambda *_args, **_kwargs: (
+            PullRequestDocumentationResult(
+                title="Clarify the guide",
+                body=(
+                    "## Summary\n\nClarify the guide.\n\n"
+                    "## Testing\n\nRepository tests were not run "
+                    "for this documentation-only change.\n\n"
+                    "Closes #1"
+                ),
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        run_routes,
+        "create_draft_pull_request",
+        lambda **_kwargs: GitHubPullRequestResult(
+            number=22,
+            url="https://github.com/example/demo/pull/22",
+        ),
+    )
+
+    result = run_routes.approve_run_final_changes(run.id)
+
+    assert result.status == RunStatus.COMPLETED
+    assert result.repository_tests_completed is False
+    assert result.repository_tests_passed is None
+    assert result.repository_test_result is None
+    assert result.commit_created is True
+    assert result.branch_pushed is True
+    assert result.draft_pr_created is True
 
 
 def test_non_interactive_final_approval_creates_pr_without_commenting(
