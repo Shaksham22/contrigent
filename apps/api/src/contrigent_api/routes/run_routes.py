@@ -39,7 +39,6 @@ from contrigent_api.services.project_reader import (
 )
 from contrigent_api.services.github_pull_request_creator import (
     GitHubPullRequestError,
-    build_pull_request_body,
     create_draft_pull_request,
     get_github_token,
     get_issue_title,

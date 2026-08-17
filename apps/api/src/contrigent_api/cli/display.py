@@ -509,6 +509,8 @@ def show_execution_started() -> None:
 
 def show_execution_result(
     run: Run,
+    *,
+    include_draft_pr_confirmation: bool = True,
 ) -> None:
     if (
         run.repository_tests_completed
@@ -577,7 +579,10 @@ def show_execution_result(
             "✓ Branch pushed"
         )
 
-    if run.draft_pr_created:
+    if (
+        run.draft_pr_created
+        and include_draft_pr_confirmation
+    ):
         print(
             "✓ Draft pull request created"
         )
@@ -602,6 +607,112 @@ def show_execution_result(
         print(
             run.draft_pr_url
         )
+
+
+def show_draft_pull_request_created() -> None:
+    print()
+    print(
+        "✓ Draft pull request created"
+    )
+
+
+def show_issue_comment_preview(
+    issue_number: int,
+    comment: str,
+) -> None:
+    print()
+    print(
+        "Issue comment"
+    )
+    print(
+        "-------------"
+    )
+    print()
+    print(
+        "Contrigent will post this comment "
+        f"to issue #{issue_number} in 5 seconds:"
+    )
+    print()
+    print(
+        comment
+    )
+    print()
+
+
+def show_issue_comment_details(
+    *,
+    issue_url: str,
+    issue_number: int,
+    pull_request_url: str,
+    pull_request_number: int,
+    comment: str,
+) -> None:
+    print(
+        "Issue comment details"
+    )
+    print(
+        "---------------------"
+    )
+    print()
+    print(
+        f"Issue URL: {issue_url}"
+    )
+    print(
+        f"Issue number: {issue_number}"
+    )
+    print(
+        f"Draft PR URL: {pull_request_url}"
+    )
+    print(
+        f"PR number: {pull_request_number}"
+    )
+    print()
+    print(
+        "Complete issue comment:"
+    )
+    print()
+    print(
+        comment
+    )
+
+
+def show_issue_comment_posted() -> None:
+    print()
+    print(
+        "✓ Issue comment posted"
+    )
+
+
+def show_issue_comment_skipped() -> None:
+    print()
+    print(
+        "○ Issue comment skipped"
+    )
+
+
+def show_issue_comment_failure(
+    pull_request_url: str,
+    error_message: str,
+) -> None:
+    print()
+    print(
+        "⚠ Draft pull request was created, but "
+        "the issue comment could not be posted."
+    )
+    print()
+    print(
+        "PR:"
+    )
+    print(
+        pull_request_url
+    )
+    print()
+    print(
+        "GitHub error:"
+    )
+    print(
+        error_message
+    )
 
 
 def show_cancelled() -> None:

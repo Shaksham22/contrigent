@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from collections.abc import Callable
+from typing import Literal
 from contrigent_api.cli.config import (
     add_token_interactively,
     ensure_required_tokens,
@@ -19,8 +21,14 @@ from contrigent_api.cli.display import (
     show_error,
     show_execution_result,
     show_execution_started,
+    show_draft_pull_request_created,
     show_header,
     show_implementation_started,
+    show_issue_comment_details,
+    show_issue_comment_failure,
+    show_issue_comment_posted,
+    show_issue_comment_preview,
+    show_issue_comment_skipped,
     show_run_progress,
     show_no_changes_needed,
     show_plan,
@@ -34,6 +42,7 @@ from contrigent_api.cli.display import (
 )
 from contrigent_api.cli.prompts import (
     ask_for_approval,
+    ask_for_issue_comment_decision,
     ask_for_round_limit,
 )
 from contrigent_api.models.project_context import (
@@ -51,6 +60,17 @@ from contrigent_api.routes.run_routes import (
 )
 from contrigent_api.services.project_reader import (
     load_project,
+)
+from contrigent_api.services.github_issue_commenter import (
+    GitHubIssueCommentError,
+    create_issue_comment,
+)
+from contrigent_api.services.github_project_downloader import (
+    parse_github_issue_url,
+)
+from contrigent_api.services.issue_comment import (
+    build_issue_comment,
+    repository_tests_succeeded,
 )
 from contrigent_api.services.repository_git_manager import (
     rollback_run_branch,
@@ -395,8 +415,18 @@ def main() -> None:
             )
         )
 
+        issue_comment_result = (
+            handle_issue_comment_publication(
+                run
+            )
+        )
+
         show_execution_result(
-            run
+            run,
+            include_draft_pr_confirmation=(
+                issue_comment_result
+                == "not_offered"
+            ),
         )
 
     except HTTPException as error:
@@ -421,6 +451,103 @@ def main() -> None:
         )
 
         raise SystemExit(1) from error
+
+
+IssueCommentPublicationResult = Literal[
+    "not_offered",
+    "posted",
+    "skipped",
+    "failed",
+]
+
+
+def handle_issue_comment_publication(
+    run: Run,
+    *,
+    decision_prompt: (
+        Callable[..., bool] | None
+    ) = None,
+    comment_creator: Callable[
+        [str, str],
+        object,
+    ] | None = None,
+) -> IssueCommentPublicationResult:
+    if (
+        not run.draft_pr_created
+        or run.draft_pr_number is None
+        or run.draft_pr_url is None
+        or run.github_issue_url is None
+    ):
+        return "not_offered"
+
+    issue = parse_github_issue_url(
+        run.github_issue_url
+    )
+    comment = build_issue_comment(
+        pull_request_number=(
+            run.draft_pr_number
+        ),
+        pull_request_url=run.draft_pr_url,
+        repository_tests_passed=(
+            repository_tests_succeeded(
+                run
+            )
+        ),
+    )
+    ask_for_decision = (
+        decision_prompt
+        or ask_for_issue_comment_decision
+    )
+    post_comment = (
+        comment_creator
+        or create_issue_comment
+    )
+
+    show_draft_pull_request_created()
+    show_issue_comment_preview(
+        issue.issue_number,
+        comment,
+    )
+
+    should_post = ask_for_decision(
+        lambda: show_issue_comment_details(
+            issue_url=run.github_issue_url,
+            issue_number=issue.issue_number,
+            pull_request_url=run.draft_pr_url,
+            pull_request_number=(
+                run.draft_pr_number
+            ),
+            comment=comment,
+        )
+    )
+
+    if not should_post:
+        show_issue_comment_skipped()
+        return "skipped"
+
+    try:
+        post_comment(
+            run.github_issue_url,
+            comment,
+        )
+    except GitHubIssueCommentError as error:
+        show_issue_comment_failure(
+            run.draft_pr_url,
+            str(error),
+        )
+        return "failed"
+    except Exception:
+        show_issue_comment_failure(
+            run.draft_pr_url,
+            (
+                "An unexpected error occurred while posting "
+                "the GitHub issue comment."
+            ),
+        )
+        return "failed"
+
+    show_issue_comment_posted()
+    return "posted"
 
 def _read_validated_value(
     prompt: str,

@@ -1,3 +1,5 @@
+import shlex
+
 from agents import Runner
 
 from contrigent_api.services.agent_model_config import (
@@ -18,7 +20,7 @@ from contrigent_api.models.run_record import (
     Run,
 )
 from contrigent_api.models.worker_result import (
-    WorkerResult,
+    FileReplacement,
 )
 
 
@@ -28,92 +30,18 @@ class PullRequestDocumentationRunnerError(
     pass
 
 
-def build_worker_results_section(
-    worker_results: dict[
-        str,
-        WorkerResult,
-    ],
+def build_proposed_changes_section(
+    proposed_files: list[FileReplacement],
 ) -> str:
-    if not worker_results:
-        return "No worker results were recorded."
+    if not proposed_files:
+        return "No changed files were recorded."
 
-    sections: list[str] = []
-
-    for worker_id, result in (
-        worker_results.items()
-    ):
-        findings = (
-            "\n".join(
-                f"- {finding}"
-                for finding in result.findings
-            )
-            if result.findings
-            else "- None"
+    return "\n".join(
+        (
+            f"- {replacement.file_path}: "
+            f"{replacement.reason}"
         )
-
-        changed_files = (
-            "\n".join(
-                (
-                    f"- {replacement.file_path}: "
-                    f"{replacement.reason}"
-                )
-                for replacement
-                in result.files_to_replace
-            )
-            if result.files_to_replace
-            else "- None"
-        )
-
-        sections.append(
-            (
-                f"WORKER: {worker_id}\n"
-                f"SUMMARY:\n"
-                f"{result.summary}\n\n"
-                f"FINDINGS:\n"
-                f"{findings}\n\n"
-                f"CHANGED FILES:\n"
-                f"{changed_files}"
-            )
-        )
-
-    return "\n\n---\n\n".join(
-        sections
-    )
-
-
-def build_reviewer_section(
-    run: Run,
-) -> str:
-    reviewer_result = (
-        run.reviewer_result
-    )
-
-    if reviewer_result is None:
-        return (
-            "No reviewer result was recorded."
-        )
-
-    findings = (
-        "\n".join(
-            (
-                f"- [{finding.severity}] "
-                f"{finding.category}: "
-                f"{finding.description}"
-            )
-            for finding
-            in reviewer_result.findings
-        )
-        if reviewer_result.findings
-        else "- None"
-    )
-
-    return (
-        f"RECOMMENDATION: "
-        f"{reviewer_result.recommendation}\n\n"
-        f"SUMMARY:\n"
-        f"{reviewer_result.summary}\n\n"
-        f"FINDINGS:\n"
-        f"{findings}"
+        for replacement in proposed_files
     )
 
 
@@ -130,20 +58,25 @@ def build_repository_test_section(
             "was recorded."
         )
 
-    stdout = result.stdout.strip()
+    output = (
+        result.stdout
+        + "\n"
+        + result.stderr
+    ).strip()
 
-    if len(stdout) > 4000:
-        stdout = stdout[-4000:]
+    if len(output) > 4000:
+        output = output[-4000:]
 
     return (
         f"PASSED: {result.passed}\n"
         f"STAGE: {result.stage}\n"
+        f"COMMAND: {shlex.join(result.command)}\n"
         f"EXIT CODE: {result.exit_code}\n"
         f"TIMED OUT: {result.timed_out}\n"
         f"DURATION SECONDS: "
         f"{result.duration_seconds}\n\n"
         f"TEST OUTPUT:\n"
-        f"{stdout or 'No stdout recorded.'}"
+        f"{output or 'No output recorded.'}"
     )
 
 
@@ -152,12 +85,6 @@ def build_pull_request_documentation_input(
     run: Run,
     issue_number: int,
 ) -> str:
-    manager_summary = (
-        run.analysis.summary
-        if run.analysis is not None
-        else "No Manager analysis recorded."
-    )
-
     branch_name = (
         run.run_branch
         or "Unknown branch"
@@ -180,15 +107,9 @@ def build_pull_request_documentation_input(
         f"Issue number: {issue_number}\n\n"
         f"{project.issue}\n\n"
 
-        "=== MANAGER ANALYSIS ===\n"
-        f"{manager_summary}\n\n"
-
-        "=== WORKER RESULTS ===\n"
-        f"{build_worker_results_section(run.worker_results)}"
+        "=== VERIFIED PROPOSED CHANGES ===\n"
+        f"{build_proposed_changes_section(run.proposed_files)}"
         "\n\n"
-
-        "=== INDEPENDENT REVIEW ===\n"
-        f"{build_reviewer_section(run)}\n\n"
 
         "=== VERIFIED REPOSITORY TESTS ===\n"
         f"{build_repository_test_section(run)}\n\n"

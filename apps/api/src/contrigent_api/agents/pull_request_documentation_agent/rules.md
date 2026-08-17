@@ -33,10 +33,14 @@ The pull request title must:
 The pull request body must:
 - be concise but useful to a maintainer
 - distinguish implemented changes from verification
+- contain `## Summary`, `## Changes`, and `## Testing` in that order
+- not contain an `## Review` section
 - mention changed files only when relevant
 - describe tests only when the evidence proves they were run
-- report reviewer findings accurately
+- not expose Manager, worker, or Independent Reviewer reasoning
+- not mention worker IDs or internal agent assignments
 - include exactly one "Closes #<issue number>" line
+- not add a Contrigent footer or attribution; the host appends it deterministically
 
 Do not claim that the pull request is safe, correct, production-ready, or complete merely because tests passed.
 

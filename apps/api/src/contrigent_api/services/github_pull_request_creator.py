@@ -13,8 +13,8 @@ from contrigent_api.services.github_project_downloader import (
 GITHUB_API_VERSION = "2026-03-10"
 PULL_REQUEST_ATTRIBUTION = (
     "\n\n---\n\n"
-    "This pull request and its code changes were generated using "
-    "**Contrigent**, a multi-agent software engineering framework "
+    "This pull request was prepared using **Contrigent**, a multi-agent "
+    "open-source contribution system "
     "developed by [Shaksham22](https://github.com/Shaksham22)."
 )
 
@@ -58,24 +58,6 @@ def get_issue_title(
 
     return "Contrigent proposed changes"
 
-
-def build_pull_request_body(
-    issue_number: int,
-    analysis_summary: str,
-    test_summary: str,
-) -> str:
-    return (
-        "## Summary\n\n"
-        f"{analysis_summary}\n\n"
-        "## Validation\n\n"
-        "- Repository tests passed in Contrigent's "
-        "isolated Docker test environment.\n"
-        f"- Test result: {test_summary}\n\n"
-        f"Closes #{issue_number}\n\n"
-        "---\n"
-        "Draft pull request created by Contrigent "
-        "after human approval."
-    )
 
 def create_draft_pull_request(
     repository_url: str,

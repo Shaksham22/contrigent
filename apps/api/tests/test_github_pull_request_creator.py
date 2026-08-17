@@ -2,7 +2,7 @@ import pytest
 
 from contrigent_api.services.github_pull_request_creator import (
     GitHubPullRequestError,
-    build_pull_request_body,
+    PULL_REQUEST_ATTRIBUTION,
     create_draft_pull_request,
     get_github_token,
     get_issue_title,
@@ -21,18 +21,6 @@ def test_issue_title_is_read_from_markdown() -> None:
         )
         == "Example issue"
     )
-
-
-def test_pull_request_body_links_issue() -> None:
-    body = build_pull_request_body(
-        issue_number=7,
-        analysis_summary="Fix atomic reservation.",
-        test_summary="10 tests passed",
-    )
-
-    assert "Fix atomic reservation." in body
-    assert "10 tests passed" in body
-    assert "Closes #7" in body
 
 
 def test_missing_github_token_is_rejected(
@@ -103,7 +91,16 @@ def test_fork_branch_is_used_as_pr_head(
         fake_urlopen,
     )
 
-    create_draft_pull_request(
+    body = (
+        "## Summary\n\n"
+        "Fix atomic reservation.\n\n"
+        "## Changes\n\n"
+        "- Validate the order before mutation.\n\n"
+        "## Testing\n\n"
+        "- 10 tests passed.\n\n"
+        "Closes #1"
+    )
+    result = create_draft_pull_request(
         repository_url=(
             "https://github.com/"
             "upstream/demo"
@@ -116,7 +113,7 @@ def test_fork_branch_is_used_as_pr_head(
         head_branch="contrigent/test-run",
         base_branch="main",
         title="Fix issue",
-        body="Test body",
+        body=body,
     )
 
     assert captured_payload["head"] == (
@@ -125,3 +122,16 @@ def test_fork_branch_is_used_as_pr_head(
 
     assert captured_payload["base"] == "main"
     assert captured_payload["draft"] is True
+    assert result.number == 12
+    assert result.url.endswith("/pull/12")
+
+    published_body = captured_payload["body"]
+    assert "## Summary" in published_body
+    assert "## Changes" in published_body
+    assert "## Testing" in published_body
+    assert "Closes #1" in published_body
+    assert PULL_REQUEST_ATTRIBUTION.strip() in published_body
+    assert "## Review" not in published_body
+    assert "Independent Reviewer" not in published_body
+    assert "Manager reasoning" not in published_body
+    assert "worker reasoning" not in published_body

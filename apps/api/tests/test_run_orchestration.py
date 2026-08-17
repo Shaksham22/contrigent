@@ -12,6 +12,9 @@ from contrigent_api.agents.issue_analyzer.output_schema import (
     IssueAnalysis,
     WorkerAssignment,
 )
+from contrigent_api.agents.pull_request_documentation_agent.output_schema import (
+    PullRequestDocumentationResult,
+)
 from contrigent_api.models.project_context import (
     ProjectContext,
     ProjectSource,
@@ -47,6 +50,12 @@ from contrigent_api.services.repository_environment_verifier import (
 )
 from contrigent_api.services.repository_test_runner import (
     RepositoryTestStrategy,
+)
+from contrigent_api.services.github_pull_request_creator import (
+    GitHubPullRequestResult,
+)
+from contrigent_api.services import (
+    github_issue_commenter,
 )
 
 
@@ -1592,3 +1601,138 @@ def test_final_testing_replays_stored_strategy(
 
     assert result.status == RunStatus.TESTS_FAILED
     assert replayed_strategies == [recipe.strategy]
+
+
+def test_non_interactive_final_approval_creates_pr_without_commenting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = make_project(tmp_path)
+    run = create_run(
+        "example",
+        ProjectSource.GITHUB,
+        github_issue_url=(
+            "https://github.com/example/demo/issues/1"
+        ),
+        github_repository_url=(
+            "https://github.com/example/demo"
+        ),
+    )
+    run.original_branch = "main"
+    run.run_branch = "contrigent/test-run"
+    attach_analysis(
+        run.id,
+        make_analysis("Implement the fix."),
+    )
+    approve_plan(run.id)
+    start_worker_work(run.id)
+    complete_worker_work(
+        run.id,
+        *make_worker_result("candidate"),
+    )
+    record_candidate_test_result(
+        run.id,
+        make_test_result(True),
+    )
+    start_review(run.id)
+    complete_review(
+        run.id,
+        ReviewerResult(
+            recommendation="approve",
+            summary="Approved.",
+            findings=[],
+            files_reviewed=[
+                "src/example.py"
+            ],
+        ),
+    )
+    comment_calls = 0
+
+    def fake_comment(
+        _issue_url: str,
+        _body: str,
+    ) -> None:
+        nonlocal comment_calls
+        comment_calls += 1
+
+    monkeypatch.setattr(
+        github_issue_commenter,
+        "create_issue_comment",
+        fake_comment,
+    )
+    monkeypatch.setattr(
+        run_routes,
+        "get_github_token",
+        lambda: "token",
+    )
+    monkeypatch.setattr(
+        run_routes,
+        "load_project",
+        lambda *_args: project,
+    )
+    monkeypatch.setattr(
+        run_routes,
+        "ensure_expected_run_branch",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        run_routes,
+        "apply_approved_files",
+        lambda *_args: [],
+    )
+    monkeypatch.setattr(
+        run_routes,
+        "execute_repository_test_strategy",
+        lambda *_args, **_kwargs: (
+            make_test_result(True)
+        ),
+    )
+    monkeypatch.setattr(
+        run_routes,
+        "create_approved_commit",
+        lambda *_args, **_kwargs: "a" * 40,
+    )
+    monkeypatch.setattr(
+        run_routes,
+        "get_authenticated_github_user",
+        lambda: "contributor",
+    )
+    monkeypatch.setattr(
+        run_routes,
+        "push_run_branch",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        run_routes,
+        "run_pull_request_documentation",
+        lambda *_args, **_kwargs: (
+            PullRequestDocumentationResult(
+                title="Fix example behavior",
+                body=(
+                    "## Summary\n\nFix behavior.\n\n"
+                    "## Changes\n\n- Update example.\n\n"
+                    "## Testing\n\n- 2 tests passed.\n\n"
+                    "Closes #1"
+                ),
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        run_routes,
+        "create_draft_pull_request",
+        lambda **_kwargs: GitHubPullRequestResult(
+            number=21,
+            url=(
+                "https://github.com/example/demo/pull/21"
+            ),
+        ),
+    )
+
+    result = run_routes.approve_run_final_changes(
+        run.id
+    )
+
+    assert result.status == RunStatus.COMPLETED
+    assert result.draft_pr_created is True
+    assert result.draft_pr_number == 21
+    assert comment_calls == 0
